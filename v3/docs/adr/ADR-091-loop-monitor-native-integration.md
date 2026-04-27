@@ -81,6 +81,26 @@ The AI agent orchestration landscape has converged on several patterns:
 
 Deeply integrate Claude Code's native capabilities into Ruflo across 5 workstreams, deprecating Ruflo's reimplementations where the native equivalent is strictly superior.
 
+### Runtime Capability Abstraction
+
+To prevent over-coupling to Claude Code, Ruflo detects available capabilities at startup and selects the appropriate execution path:
+
+```typescript
+interface RuntimeCapabilities {
+  loop: boolean;         // ScheduleWakeup available
+  monitor: boolean;      // Monitor tool available
+  cron: boolean;         // CronCreate/Delete/List available
+  teams: boolean;        // TeamCreate/SendMessage available
+  worktreeIsolation: boolean;  // Agent isolation: "worktree"
+  pushNotification: boolean;   // PushNotification/RemoteTrigger
+}
+```
+
+Three execution tiers, selected by capability detection:
+1. **Claude Code native** — all capabilities available → use ScheduleWakeup, Monitor, CronCreate, Agent Teams
+2. **MCP-compatible fallback** — MCP transport active but native tools missing → use MCP tools with polling
+3. **CI/daemon fallback** — headless/CI environment → use detached daemon with setInterval timers
+
 ### Workstream 1: /loop as the Primary Worker Scheduler
 
 **Replace `daemon start` with `/loop`-based workers for all in-session work.**
@@ -131,6 +151,16 @@ The `hooks worker dispatch` MCP tool should return `ScheduleWakeup`-compatible m
 
 Key insight: **In-session workers use /loop with cache-aware delays. Background workers use CronCreate for fire-and-forget.**
 
+#### Cache Timing Guardrail
+
+The 270s recommendation assumes Anthropic's current 5-minute cache TTL. To avoid hard-coding provider behavior:
+
+```
+cache_warm_delay_seconds = min(270, provider_cache_ttl_seconds * 0.9)
+```
+
+This formula keeps the delay 10% below the TTL boundary, accommodating future TTL changes or alternative providers.
+
 #### Daemon Deprecation Path
 
 1. Phase 1: Add `/loop` support alongside daemon (both work)
@@ -160,11 +190,16 @@ Add `--stream` flag to swarm-related commands that outputs newline-delimited JSO
 
 ```bash
 npx @claude-flow/cli swarm watch --stream
-# Output (one line per event):
-{"event":"agent_started","agent":"coder-1","task":"implement auth","ts":"2026-04-27T10:00:00Z"}
-{"event":"agent_completed","agent":"coder-1","result":"success","duration_ms":45000,"ts":"2026-04-27T10:00:45Z"}
-{"event":"agent_started","agent":"tester-1","task":"write auth tests","ts":"2026-04-27T10:00:46Z"}
+# Output (one line per event, NDJSON with schema versioning):
+{"schema":"ruflo.event.v1","event":"agent_started","runId":"run_abc123","agentId":"coder-1","task":"implement auth","ts":"2026-04-27T10:00:00Z"}
+{"schema":"ruflo.event.v1","event":"agent_completed","runId":"run_abc123","agentId":"coder-1","result":"success","duration_ms":45000,"ts":"2026-04-27T10:00:45Z"}
+{"schema":"ruflo.event.v1","event":"agent_started","runId":"run_abc123","agentId":"tester-1","task":"write auth tests","ts":"2026-04-27T10:00:46Z"}
 ```
+
+Every NDJSON event includes:
+- `schema` — versioned schema identifier (e.g. `ruflo.event.v1`) for forward-compatible parsing
+- `runId` — stable identifier for the swarm run, enabling cross-event correlation
+- `agentId` — stable agent identifier within the run
 
 Claude Code's Monitor tool streams these events, delivering each as a notification. The LLM can then react to events (e.g., when tester completes, trigger reviewer).
 
@@ -390,6 +425,7 @@ Every MCP tool response that suggests a follow-up action should include the appr
 | `commands/agent.ts` | 2 | Add `--stream` to `logs` | P2 |
 | `services/worker-daemon.ts` | 1, 3 | Auto-detect Claude Code runtime, use CronCreate | P1 |
 | `services/loop-worker-runner.ts` | 1 | New: stateless worker for /loop execution | P1 |
+| `services/runtime-capabilities.ts` | 1, 2, 3, 4 | New: RuntimeCapabilities detection + 3-tier execution path selection | P0 |
 | `services/headless-worker-executor.ts` | 1 | Deprecation path documentation | P2 |
 | `.claude/skills/worker-integration/` | 1 | /loop + CronCreate teaching | P1 |
 | `.claude/skills/swarm-orchestration/` | 2, 4 | Monitor + TeamCreate teaching | P1 |
@@ -427,12 +463,31 @@ Every MCP tool response that suggests a follow-up action should include the appr
 
 | Metric | Before | Target | How to Measure |
 |--------|--------|--------|----------------|
-| Worker cold-start cost | ~$0.01-0.05/run | $0 (in-context) | Cost per /loop iteration |
+| Worker cold-start cost | ~$0.01-0.05/run | Near-zero incremental cost (in active Claude Code context) | Cost per /loop iteration |
 | Orphan daemon processes | ~5% of sessions | 0% | Track PID file staleness |
 | Swarm status latency | 2-5s (poll + MCP) | <100ms (Monitor event) | Time from event to notification |
 | Worker scheduling accuracy | +/- 30s (timer drift) | +/- 1s (ScheduleWakeup) | Actual vs scheduled execution time |
 | Agent file conflicts | ~10% of parallel runs | 0% (worktree) | Git conflict rate in multi-agent work |
 | CLAUDE.md instruction size | ~800 lines | ~500 lines | Line count of orchestration instructions |
+
+## Acceptance Test
+
+ADR-091 is implemented when the following end-to-end scenario works:
+
+1. User asks: "Monitor my swarm and run audits every few minutes."
+2. Ruflo suggests `/loop` for active audit work (not `daemon start`).
+3. Ruflo suggests `Monitor("npx @claude-flow/cli swarm watch --stream")` for live swarm updates.
+4. No detached daemon process starts inside Claude Code.
+5. A file-modifying agent is spawned with `isolation: "worktree"`.
+6. The same workflow falls back to daemon mode in a CI/headless environment (no Claude Code runtime).
+7. All NDJSON events include `schema`, `runId`, and `agentId` fields.
+8. `RuntimeCapabilities` detection correctly selects native vs. fallback execution path.
+
+## Conclusion
+
+Ruflo should become the **orchestration intelligence layer**, not the lifecycle manager of last resort. Claude Code should own scheduling, monitoring, task state, agent isolation, and notifications when available. Ruflo should provide policy, routing, swarm semantics, worker logic, auditability, and fallback execution.
+
+That is the cleaner boundary.
 
 ## References
 
