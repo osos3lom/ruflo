@@ -116,6 +116,33 @@ console.log('[bonus] wrapUserInput strips </user_input> attempts');
   check('wrapped output ends with </user_input>', wrapped.endsWith('</user_input>'));
 }
 
+// ── R-1.2: wrapUserInput strips control characters ──────────────
+console.log('[R-1.2] wrapUserInput rejects control characters');
+{
+  const { wrapUserInput } = await import('../functions/_lib/sanitize.ts');
+
+  // Mixed control bytes + legitimate punctuation (research goals often
+  // contain $, parens, etc. — those MUST survive).
+  const dirty = 'Best EV under $50k\x00\x07 with 4-seat capacity\x1F';
+  const wrapped = wrapUserInput(dirty);
+  check('null byte stripped', !wrapped.includes('\x00'));
+  check('bell stripped', !wrapped.includes('\x07'));
+  check('US (0x1F) stripped', !wrapped.includes('\x1F'));
+  check('legitimate $ preserved', wrapped.includes('$50k'));
+  check('legitimate hyphen preserved', wrapped.includes('4-seat'));
+
+  // Whitespace control chars allowed (\n \r \t)
+  const multiline = 'Line one\nLine two\tindented';
+  const wrappedML = wrapUserInput(multiline);
+  check('newline preserved', wrappedML.includes('\n'));
+  check('tab preserved', wrappedML.includes('\t'));
+
+  // Over-length input throws (10,000 char cap)
+  let threwOnTooLong = false;
+  try { wrapUserInput('x'.repeat(10_001)); } catch { threwOnTooLong = true; }
+  check('throws on >10k chars', threwOnTooLong);
+}
+
 console.log('');
 console.log(`Passed: ${pass}  Failed: ${fail}`);
 process.exit(fail);
