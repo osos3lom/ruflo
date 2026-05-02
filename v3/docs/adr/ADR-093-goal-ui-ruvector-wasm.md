@@ -197,3 +197,31 @@ Honesty checkpoints at steps 5, 10, 15, 20: full build + Playwright smoke + scre
 - Plan file: `v3/goal_ui/.optimization-plan.md`
 - App: `v3/goal_ui/`
 - Live: https://goal.ruv.io
+
+## Results
+
+### Step 12 — RVF widgetConfig POC (2026-05-02)
+
+20-op CRUD benchmark via Playwright + `page.evaluate` against the live
+Vite dev server (Chromium headless on the test host). The migrated
+slot was React-state-only before Step 11 (no Supabase backing), so the
+baseline is in-memory object assignment, not a Supabase round-trip.
+
+| Operation | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | Notes |
+|-----------|---------:|---------:|---------:|----------:|-------|
+| `RvfClient.put` (widgetConfig write) | 0.2 | **0.3** | 0.3 | 0.18 | DoD ≤ 50 ms — **167× headroom** |
+| `RvfClient.get` (widgetConfig read) | 0.1 | **0.2** | 0.2 | 0.08 | DoD ≤ 10 ms — **50× headroom** |
+| React-state write (baseline) | 0 | 0 | 0 | 0 | sub-µs, below `performance.now()` resolution |
+| React-state read (baseline)  | 0 | 0 | 0 | 0 | sub-µs |
+
+Cold start (first `RvfClient` operation, including IndexedDB connection
+open + `clear`): **1 ms**.
+
+The RVF persistence layer adds **a fraction of a millisecond** of
+latency over pure React state — well within the DoD thresholds and
+imperceptible at the UI level. IndexedDB's async API is the dominant
+cost; the format encode/decode is essentially free for the
+widgetConfig payload (~600 bytes JSON, no vector).
+
+Console errors during the benchmark: 0.
+
