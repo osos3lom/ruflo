@@ -15,13 +15,20 @@
 
 node_modules
 #!include:.gitignore
+# Re-include dist/ — the parent repo's .gitignore (or transitively
+# included files) may exclude it; we need it for combined-deploy.
+!dist
+!dist/**
+!dist/index.html
+!dist/assets/**
 
-# Cloud Functions deploy filter — only `functions/` source is needed.
-# Excluding the frontend SPA + tests + dist keeps build fast + upload small.
+# Cloud Run combined-frontend+backend deploy filter.
+# Server.ts serves dist/ at / when present (single-service mode).
+# So we DO upload `dist/` (built locally with `npm run build`)
+# and exclude only the frontend SOURCE files we don't need at runtime.
 src/
 public/
-dist/
-index.html
+/index.html
 vite.config.ts
 postcss.config.js
 tailwind.config.ts

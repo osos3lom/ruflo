@@ -4,12 +4,23 @@
 > assumptions in `docs/DEPLOYMENT.md`. Adopts ADR-093 (Anthropic-direct + Secret
 > Manager), ADR-094 (security primitives), and ADR-098 (MCP server topology).
 >
-> **Note (2026-05-02):** Functions backend pivoted from per-handler Cloud Functions
-> Gen2 to a single **Cloud Run service** that hosts the existing Hono router
-> (`functions/server.ts`). One URL covers all routes; matches the SPA's
-> path-based routing (`${BASE}/functions/v1/<name>`); no per-fn package.json
-> fragmentation; TypeScript boots via `npm start` (`tsx functions/server.ts`).
-> See `scripts/gcp-deploy-cloudrun.sh`.
+> **Note (2026-05-02):** Pivoted **twice** during initial deploy.
+>
+> 1. **GCF Gen2 (per-handler) → Cloud Run (single service)**: GCF's nodejs
+>    buildpack auto-runs `npm run build` (the Vite frontend build, fails in
+>    container) and expects a single `package.json::main`. Pivoted to a single
+>    Cloud Run service hosting the Hono router from `functions/server.ts` —
+>    one URL covers all `/functions/v1/<name>` routes.
+> 2. **Backend-only → Combined frontend+backend**: with backend deployed but
+>    no public frontend URL, "I don't see the UI" — pivoted again to have the
+>    same Cloud Run service serve the built SPA at `/` (Hono `serveStatic`
+>    against `dist/`, GET-only so POST `/functions/v1/*` falls through to the
+>    API handlers). Same-origin → no CORS for the SPA, no second deploy
+>    target. `npm run build` (locally) produces `dist/` which gets uploaded
+>    with the function source.
+>
+> Final topology: **one Cloud Run service**, single URL, hosts both UI and
+> functions. See `scripts/gcp-deploy-cloudrun.sh`.
 
 ## Topology
 

@@ -28,6 +28,9 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
+import { serveStatic } from '@hono/node-server/serve-static';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { generateResearchGoalHandler } from './generate-research-goal/handler';
 import { researchStepHandler } from './research-step/handler';
 import { generateActionItemsHandler } from './generate-action-items/handler';
@@ -109,13 +112,35 @@ app.use('/functions/v1/*', async (c, next) => {
   await next();
 });
 
-app.get('/', (c) => c.text(
-  'RuFlo functions dev server — endpoints:\n' +
-  '  POST /functions/v1/generate-research-goal\n' +
-  '  POST /functions/v1/research-step\n' +
-  '  POST /functions/v1/generate-action-items\n' +
-  '  POST /functions/v1/optimize-research-config\n',
-));
+// Static frontend serving (Cloud Run combined-deploy mode):
+// when `dist/` is present alongside the server, serve it at `/`
+// with SPA fallback. Both the SPA and the function endpoints live
+// at the same origin → no CORS, no separate frontend deploy.
+//
+// In local dev, `dist/` doesn't exist (the SPA runs via `npm run dev`
+// on a separate port), so this block is a no-op and we fall through
+// to the textual endpoint listing below.
+const DIST_DIR = resolve(process.cwd(), 'dist');
+const SERVE_STATIC = existsSync(DIST_DIR);
+if (SERVE_STATIC) {
+  // Restrict static serving to GET so POST /functions/v1/* falls
+  // through to the API handlers below.
+  app.get('/*', serveStatic({ root: './dist' }));
+  // SPA fallback — paths that don't match a static file fall back
+  // to index.html so React Router can take over.
+  app.get('*', async (c) => {
+    const idx = await import('node:fs/promises').then((fs) => fs.readFile(resolve(DIST_DIR, 'index.html'), 'utf8'));
+    return c.html(idx);
+  });
+} else {
+  app.get('/', (c) => c.text(
+    'RuFlo functions dev server — endpoints:\n' +
+    '  POST /functions/v1/generate-research-goal\n' +
+    '  POST /functions/v1/research-step\n' +
+    '  POST /functions/v1/generate-action-items\n' +
+    '  POST /functions/v1/optimize-research-config\n',
+  ));
+}
 
 app.post('/functions/v1/generate-research-goal', async (c) => {
   const body = await c.req.json().catch(() => ({}));

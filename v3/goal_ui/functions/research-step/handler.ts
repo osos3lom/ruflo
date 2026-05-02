@@ -144,11 +144,16 @@ export async function researchStepHandler(
     ctx ? `Prior step findings:\n${ctx}` : 'No prior steps yet.',
   ].join('\n\n');
 
+  // R-7.x post-deploy fix: ignore the SPA-provided `aiModel` field.
+  // Legacy SPA configs default to Lovable Gateway model strings
+  // ("google/gemini-2.5-flash") which Anthropic rejects with 404.
+  // Server-side model selection (via RUFLO_LLM_MODEL env or
+  // _lib/llm.ts default) is also the right defense-in-depth posture:
+  // an attacker can't drive up cost by selecting an expensive model.
   const result = await callLlmWithTool({
     system: SYSTEM_PROMPT,
     user: userPrompt,
     tool: { name: 'return_findings', description: 'Return findings for the current research step', parameters: TOOL_PARAMS },
-    model: req.aiModel,
   });
 
   if (result.status !== 200) return { status: result.status, body: { error: result.error } };

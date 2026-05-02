@@ -1,0 +1,96 @@
+{
+  "url": "https://ruflo-research-fns-vi6poqcldq-uc.a.run.app",
+  "fnCalls": [
+    {
+      "url": "https://ruflo-research-fns-vi6poqcldq-uc.a.run.app/functions/v1/generate-research-goal",
+      "method": "POST",
+      "startedAt": 1777745918860
+    },
+    {
+      "url": "https://ruflo-research-fns-vi6poqcldq-uc.a.run.app/functions/v1/optimize-research-config",
+      "method": "POST",
+      "startedAt": 1777745918860,
+      "status": 200,
+      "tookMs": 2175
+    },
+    {
+      "url": "https://ruflo-research-fns-vi6poqcldq-uc.a.run.app/functions/v1/research-step",
+      "method": "POST",
+      "startedAt": 1777745940949,
+      "status": 502,
+      "tookMs": 252
+    },
+    {
+      "url": "https://ruflo-research-fns-vi6poqcldq-uc.a.run.app/functions/v1/research-step",
+      "method": "POST",
+      "startedAt": 1777745944234,
+      "status": 502,
+      "tookMs": 133
+    },
+    {
+      "url": "https://ruflo-research-fns-vi6poqcldq-uc.a.run.app/functions/v1/research-step",
+      "method": "POST",
+      "startedAt": 1777745947497,
+      "status": 502,
+      "tookMs": 188
+    },
+    {
+      "url": "https://ruflo-research-fns-vi6poqcldq-uc.a.run.app/functions/v1/research-step",
+      "method": "POST",
+      "startedAt": 1777745950766,
+      "status": 502,
+      "tookMs": 211
+    },
+    {
+      "url": "https://ruflo-research-fns-vi6poqcldq-uc.a.run.app/functions/v1/research-step",
+      "method": "POST",
+      "startedAt": 1777745954083,
+      "status": 502,
+      "tookMs": 133
+    },
+    {
+      "url": "https://ruflo-research-fns-vi6poqcldq-uc.a.run.app/functions/v1/research-step",
+      "method": "POST",
+      "startedAt": 1777745957317,
+      "status": 502,
+      "tookMs": 152
+    },
+    {
+      "url": "https://ruflo-research-fns-vi6poqcldq-uc.a.run.app/functions/v1/research-step",
+      "method": "POST",
+      "startedAt": 1777745960626,
+      "status": 502,
+      "tookMs": 129
+    },
+    {
+      "url": "https://ruflo-research-fns-vi6poqcldq-uc.a.run.app/functions/v1/research-step",
+      "method": "POST",
+      "startedAt": 1777745963356,
+      "status": 502,
+      "tookMs": 138
+    },
+    {
+      "url": "https://ruflo-research-fns-vi6poqcldq-uc.a.run.app/functions/v1/generate-action-items",
+      "method": "POST",
+      "startedAt": 1777745965549
+    }
+  ],
+  "errors": [
+    "Failed to load resource: the server responded with a status of 502 ()",
+    "❌ Error fetching research data: {message: AI gateway error: 404, status: 502}",
+    "Failed to load resource: the server responded with a status of 502 ()",
+    "❌ Error fetching research data: {message: AI gateway error: 404, status: 502}",
+    "Failed to load resource: the server responded with a status of 502 ()",
+    "❌ Error fetching research data: {message: AI gateway error: 404, status: 502}",
+    "Failed to load resource: the server responded with a status of 502 ()",
+    "❌ Error fetching research data: {message: AI gateway error: 404, status: 502}",
+    "Failed to load resource: the server responded with a status of 502 ()",
+    "❌ Error fetching research data: {message: AI gateway error: 404, status: 502}",
+    "Failed to load resource: the server responded with a status of 502 ()",
+    "❌ Error fetching research data: {message: AI gateway error: 404, status: 502}",
+    "Failed to load resource: the server responded with a status of 502 ()",
+    "❌ Error fetching research data: {message: AI gateway error: 404, status: 502}",
+    "Failed to load resource: the server responded with a status of 502 ()"
+  ],
+  "ts": "2026-05-02T18:19:29.768Z"
+}
