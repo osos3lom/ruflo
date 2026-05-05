@@ -162,16 +162,34 @@ Two-step migration plan after cli-core@alpha lands:
 
 ## Plan of work
 
-| Step | What | Owner | Status |
-|---|---|---|---|
-| 1 | Branch `feat/cli-core-split` + ADR-100 + scaffold | claude | this fire |
-| 2 | Create `v3/@claude-flow/cli-core/` package + scaffold (package.json, tsconfig, src/) | next fire | pending |
-| 3 | Move `commands/memory.ts`, `commands/hooks.ts`, `mcp-tools/{memory,hooks}-tools.ts`, `output.ts`, `types.ts` into cli-core | next fire | pending |
-| 4 | Build cli-core, smoke `npx @claude-flow/cli-core memory --help` | next fire | pending |
-| 5 | Update `@claude-flow/cli/src/index.ts` to re-export from cli-core + lazy-load extras | next fire | pending |
-| 6 | Cold-cache benchmark: old vs new, persist to `docs/benchmarks/cli-core-cold-cache.json` | next fire | pending |
-| 7 | Bump `cli-core` to `3.7.0-alpha.1`, `cli` to `3.7.0-alpha.1`, publish under `--tag alpha` | next fire | pending |
-| 8 | PR description with cold-cache numbers + open issue cross-referencing #1748 | next fire | pending |
+| Step | What | Status |
+|---|---|---|
+| 1 | Branch `feat/cli-core-split` + ADR-100 + scaffold | ✅ done — fire 1 |
+| 2a | Foundation surface in cli-core (types, output, MCP-tool-types, validate-input) | ✅ done — fire 2 (commit `2329b81fa`, 136 KB / 20 files dist) |
+| **2b** | **Architectural discovery (fire 3) — see "Discovery" below** | ✅ surfaced; informs steps 3+ |
+| 3 | Backend abstraction: extract a lite memory backend (JSON-only, no sql.js/HNSW/ONNX) so `mcp-tools/memory-tools.ts` can copy cleanly into cli-core. Heavy backend stays in @claude-flow/cli. | pending |
+| 4 | Definitions/handlers split for `hooks-tools.ts` — tool definitions (name/description/inputSchema, ~10 KB) live in cli-core; handler functions that actually do the work stay in cli with dynamic-import wiring. | pending |
+| 5 | Update `@claude-flow/cli/src/index.ts` to re-export from cli-core + register lazy-loaded extras for non-foundation commands. | pending |
+| 6 | Cold-cache benchmark: old vs new, persist to `docs/benchmarks/cli-core-cold-cache.json`. | pending |
+| 7 | Bump `cli-core` to `3.7.0-alpha.1` once steps 3+4 land; publish under `--tag alpha`. (alpha.0 published in fire 3 with foundation-only.) | partial |
+| 8 | PR description with cold-cache numbers + comment on issue #1760 with proof. | pending |
+
+## Discovery (fire 3)
+
+Initial assumption (fire 1's plan): "move memory + hooks source files into cli-core". Reality (fire 3): **both `memory-tools.ts` and `hooks-tools.ts` have deep transitive ML dependencies** that defeat the lite-bundle goal:
+
+- `memory-tools.ts` (30 KB top-level) → `../memory/memory-initializer.js` (2830 LOC) → `fs-secure.ts` → `encryption/vault.ts` (ADR-096)
+- `hooks-tools.ts` (146 KB top-level) → 9 transitive imports across `memory/{sona-optimizer, ewc-consolidation, memory-bridge}` (the SONA/EWC++ neural surface) and `ruvector/{moe-router, semantic-router, flash-attention, lora-adapter, enhanced-model-router}` (the ML routing layer)
+
+Pulling those into cli-core would balloon it past the 250 KB packed target. The **right architectural move** is what the ADR's "Riskiest assumption" hinted at but didn't concretize:
+
+1. **Memory backend abstraction.** Define a `MemoryBackend` interface in cli-core. cli-core ships a `JsonMemoryBackend` (no SQLite, no HNSW — just JSON file at `.swarm/memory.json`). cli ships a `SqliteHnswMemoryBackend` (the existing implementation) that swaps in via env-var or import map. Plugin scripts that only need basic store/retrieve get the lite backend's <2s cold-cache; plugins that need semantic search opt into the heavy backend.
+
+2. **Tool-definition / handler split.** MCP tool *definitions* (the `MCPTool` shape: name, description, inputSchema) are pure data and small (~10 KB total for memory + hooks). They go in cli-core. The *handler* implementations (the actual code that runs when an MCP request fires) stay in cli's full module tree, accessed via dynamic-import only at request time. cli-core exposes the definitions so a metapackage can register them with the MCP server; the metapackage routes invocations to its full handler tree.
+
+This is more work than fire 1 anticipated — likely 4-6 additional fires to land cleanly, vs the original "next fire" estimate. The ADR is updated to reflect the actual shape of the work.
+
+**Net conclusion: foundation-only alpha.0 ships now (proves publish pipeline + gives plugin authors type imports). Backend abstraction + tool/handler split land in alpha.1 and alpha.2.**
 
 ## Related
 
