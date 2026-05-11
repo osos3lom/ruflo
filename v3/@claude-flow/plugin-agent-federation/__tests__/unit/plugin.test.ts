@@ -178,10 +178,10 @@ describe('AgentFederationPlugin', () => {
   });
 
   describe('registerMCPTools', () => {
-    it('should return 13 MCP tool definitions', () => {
-      // 9 original + 3 ADR-097 Phase 4 + 1 ADR-097 Phase 3 upstream
+    it('should return 16 MCP tool definitions', () => {
+      // 9 original + 3 ADR-097 Phase 4 + 1 ADR-097 Phase 3 upstream + 3 ADR-111 Phase 6
       const tools = plugin.registerMCPTools();
-      expect(tools).toHaveLength(13);
+      expect(tools).toHaveLength(16);
     });
 
     it.each([
@@ -200,6 +200,10 @@ describe('AgentFederationPlugin', () => {
       'federation_reactivate',
       // ADR-097 Phase 3 upstream
       'federation_report_spend',
+      // ADR-111 Phase 6
+      'federation_wg_status',
+      'federation_wg_attest',
+      'federation_wg_keyrotate',
     ] as const)('should include tool "%s"', (expectedName) => {
       const tools = plugin.registerMCPTools();
       const names = tools.map((t) => t.name);

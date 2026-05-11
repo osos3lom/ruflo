@@ -426,6 +426,16 @@ export class FederationCoordinator {
   }
 
   /**
+   * ADR-111 Phase 6: public read of the discovery peer list. Used by
+   * federation_wg_status MCP tool + WG firewall projection. Returns the
+   * full known-peer set (active + suspended + evicted) — filter via
+   * .isActive / state if you only want the live mesh members.
+   */
+  listPeers(): readonly FederationNode[] {
+    return this.discovery.listPeers();
+  }
+
+  /**
    * Aggregated counts for the doctor surface — `{ active: N, suspended: M,
    * evicted: K }`. Cheap O(peers) sweep; safe to call from a status line.
    */

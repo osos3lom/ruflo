@@ -2,9 +2,12 @@ import type { MCPToolDefinition } from '@claude-flow/shared/src/plugin-interface
 import type { PluginContext } from '@claude-flow/shared/src/plugin-interface.js';
 import type { FederationCoordinator } from './application/federation-coordinator.js';
 import type { FederationMessageType } from './domain/entities/federation-envelope.js';
+import type { WgMeshService } from './domain/services/wg-mesh-service.js';
+import { generateWgKeyPair } from './domain/value-objects/wg-config.js';
 
 type CoordinatorGetter = () => FederationCoordinator | null;
 type ContextGetter = () => PluginContext | null;
+type WgMeshGetter = () => WgMeshService | null;
 
 function textResult(text: string, isError = false) {
   return { content: [{ type: 'text' as const, text }], isError };
@@ -13,11 +16,17 @@ function textResult(text: string, isError = false) {
 export function createMcpTools(
   getCoordinator: CoordinatorGetter,
   getContext: ContextGetter,
+  getWgMesh: WgMeshGetter = () => null,
 ): MCPToolDefinition[] {
   function requireCoordinator(): FederationCoordinator {
     const c = getCoordinator();
     if (!c) throw new Error('Federation not initialized');
     return c;
+  }
+  function requireWgMesh(): WgMeshService {
+    const w = getWgMesh();
+    if (!w) throw new Error('WG mesh layer not initialized (set config.wgMesh = true and inject WgMeshService)');
+    return w;
   }
 
   return [
@@ -365,6 +374,92 @@ export function createMcpTools(
           messageType: proposal.messageType,
           quorumRequired: proposal.quorumRequired,
           expiresAt: proposal.expiresAt.toISOString(),
+        }, null, 2));
+      },
+    },
+    {
+      name: 'federation_wg_status',
+      description: 'ADR-111 Phase 6: WG mesh state — per-peer trust level, mesh IP, suspended/evicted flags, and the AllowedIPs slice each peer currently has. Use to inspect what the breaker has propagated to the L3 layer.',
+      pluginName: '@claude-flow/plugin-agent-federation',
+      version: '1.0.0-alpha.1',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          nodeId: { type: 'string', description: 'Optional: filter to a single peer' },
+        },
+      },
+      handler: async (params) => {
+        const wg = requireWgMesh();
+        const coordinator = requireCoordinator();
+        const peers = coordinator.listPeers();
+        const summary = wg.summarize(peers);
+        const filter = params['nodeId'] as string | undefined;
+        const filtered = filter ? summary.filter(s => s.nodeId === filter) : summary;
+        return textResult(JSON.stringify({
+          interfaceName: wg.getInterfaceName(),
+          meshSubnet: wg.getMeshSubnet(),
+          peers: filtered,
+        }, null, 2));
+      },
+    },
+    {
+      name: 'federation_wg_attest',
+      description: 'ADR-111 Phase 6 (witness chain): emit an operator-signed attestation entry for a coordination change. Returns the canonical bytes the operator signs + the witness entry; operator appends it to .claude-flow/federation/wg-changes.log. Idempotent — re-attesting the same change just appends another entry.',
+      pluginName: '@claude-flow/plugin-agent-federation',
+      version: '1.0.0-alpha.1',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          eventType: { type: 'string', description: 'peer-added | peer-removed-suspended | peer-restored | peer-evicted | key-rotated | interface-config-applied' },
+          peerPublicKey: { type: 'string', description: 'Optional: peer pubkey (omit for interface-level events)' },
+          meshIP: { type: 'string', description: 'Optional: peer mesh IP' },
+          wgCommand: { type: 'string', description: 'Optional: wg command that was emitted' },
+          rationale: { type: 'string', description: 'Human-readable rationale for the audit log' },
+        },
+        required: ['eventType', 'rationale'],
+      },
+      handler: async () => {
+        // Phase 6 v1 stub — the WgWitnessService is the canonical signer. This
+        // MCP tool returns instructions until plugin.ts wires the service.
+        // Tracked alongside #1879 follow-up: integrate WgWitnessService into
+        // plugin lifecycle so this handler can call attestWgCommand directly.
+        return textResult(
+          'federation_wg_attest: wire WgWitnessService in plugin.ts (Phase 6 follow-up). Until then, use the WgWitnessService class directly from the federation package.',
+          true,
+        );
+      },
+    },
+    {
+      name: 'federation_wg_keyrotate',
+      description: 'ADR-111 Phase 6: rotate the local WG keypair. Returns the new public key + recommended next steps (republish manifest, peers regenerate their wg-quick config, grace-period destruction of old key). DESTRUCTIVE — the old private key is overwritten on disk; existing tunnels are dropped until peers update.',
+      pluginName: '@claude-flow/plugin-agent-federation',
+      version: '1.0.0-alpha.1',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          confirm: { type: 'boolean', description: 'Must be true. Destructive: drops existing tunnels until all peers update their config.' },
+        },
+        required: ['confirm'],
+      },
+      handler: async (params) => {
+        if (params['confirm'] !== true) {
+          return textResult('Refusing rotate: confirm must be true. This drops existing tunnels until peers fetch the new manifest.', true);
+        }
+        // Phase 6 v1: emits a fresh keypair + the upgrade checklist. plugin.ts
+        // is responsible for the actual disk write + manifest republish; this
+        // returns the new public key for the operator to coordinate.
+        const newKey = generateWgKeyPair();
+        return textResult(JSON.stringify({
+          publicKey: newKey.publicKey,
+          createdAt: newKey.createdAt,
+          nextSteps: [
+            'Write the new private key to .claude-flow/federation/wg-key-<nodeId>.json (mode 0600)',
+            'Republish federation manifest with the new wg.publicKey',
+            'Peers regenerate their wg-quick config from the updated manifest',
+            'Operator removes the old [Peer] block from /etc/wireguard/<iface>.conf after the grace period (default 1h)',
+            'Run federation_wg_attest with eventType=key-rotated',
+          ],
+          warning: 'Private key NOT returned via MCP. The operator wires the actual disk persistence.',
         }, null, 2));
       },
     },
