@@ -43,6 +43,12 @@ export type {
   LocalTransportOptions,
 } from './transport.js';
 
+// ADR-095 G2 — FederationTransport: ConsensusTransport over the federation
+// plugin's ADR-104 WS wire (agentic-flow/transport/loader). Structural —
+// swarm doesn't import agentic-flow; the caller passes a transport instance.
+export { FederationTransport } from './federation-transport.js';
+export type { AgenticFlowTransportLike, FederationTransportOptions } from './federation-transport.js';
+
 type ConsensusImplementation = RaftConsensus | ByzantineConsensus | GossipConsensus;
 
 export class ConsensusEngine extends EventEmitter implements IConsensusEngine {

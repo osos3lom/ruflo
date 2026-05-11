@@ -39,7 +39,7 @@ if (failed > 0) process.exit(1);
 const indexSrc = readFileSync(DIST_INDEX, 'utf-8');
 const transportSrc = readFileSync(DIST_TRANSPORT, 'utf-8');
 
-const REQUIRED_INDEX_EXPORTS = ['LocalTransport', 'LocalTransportRegistry', 'generateNodeKeyPair', 'signMessage', 'verifyMessage', 'messageDigest', 'canonicalizeForSigning'];
+const REQUIRED_INDEX_EXPORTS = ['LocalTransport', 'LocalTransportRegistry', 'FederationTransport', 'generateNodeKeyPair', 'signMessage', 'verifyMessage', 'messageDigest', 'canonicalizeForSigning'];
 for (const name of REQUIRED_INDEX_EXPORTS) {
   if (new RegExp(`\\b${name}\\b`).test(indexSrc) || new RegExp(`export.*\\b${name}\\b`).test(transportSrc)) {
     pass(`G2-export — ${name} present in swarm consensus dist`);
