@@ -660,6 +660,7 @@ const statsCommand: Command = {
     try {
       const statsResult = await callMCPTool('memory_stats', {}) as {
         totalEntries: number;
+        entriesWithEmbeddings?: number;
         totalSize: string;
         version: string;
         backend: string;
@@ -768,11 +769,23 @@ const statsCommand: Command = {
             },
             {
               metric: 'HNSW Index',
-              value: hnsw.available && hnsw.initialized
-                ? output.success(`active (${hnsw.entryCount.toLocaleString()} entries)`)
-                : hnsw.available
-                  ? output.warning('available but not initialized')
-                  : output.dim('not active'),
+              // ruflo#1989 / #1987: `hnsw.entryCount` is in-process JS state
+              // (the live HNSW index of the current Node process). A fresh
+              // `memory stats` invocation has never indexed anything, so it
+              // reports 0 even when the persistent DB has thousands of
+              // entries with embeddings. Use the persistent count from the
+              // MCP tool (`entriesWithEmbeddings`, which is the actual
+              // count of rows that have a vector) as the source of truth.
+              value: (() => {
+                const persisted = typeof statsResult.entriesWithEmbeddings === 'number'
+                  ? statsResult.entriesWithEmbeddings
+                  : null;
+                const live = hnsw.entryCount || 0;
+                const total = persisted !== null ? Math.max(persisted, live) : live;
+                if (!hnsw.available) return output.dim('not active');
+                if (total === 0) return output.warning('available but not initialized');
+                return output.success(`active (${total.toLocaleString()} entries)`);
+              })(),
             },
           ]
         });
