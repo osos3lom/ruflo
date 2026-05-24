@@ -1,14 +1,14 @@
 {
   "manifest": {
     "schema": "ruflo-witness/v1",
-    "issuedAt": "2026-05-24T17:55:05.238Z",
-    "gitCommit": "4a8894dd3938c443e164e8c7f2bb2475c11ea407",
-    "branch": "impl/adr-129-rvagent-full-integration",
+    "issuedAt": "2026-05-24T22:05:22.834Z",
+    "gitCommit": "88ab2c9c5b094bed53ed4ada975c8b76e5d6629a",
+    "branch": "perf/sota-comparator-benchmarks",
     "os": "macos",
     "releases": {
-      "ruflo": "3.7.0",
-      "claude-flow": "3.7.0",
-      "@claude-flow/cli": "3.7.0",
+      "ruflo": "3.8.0",
+      "claude-flow": "3.8.0",
+      "@claude-flow/cli": "3.8.0",
       "@claude-flow/memory": "3.0.0-alpha.18"
     },
     "summary": {
@@ -117,7 +117,7 @@
         "id": "#1697",
         "desc": "rvf-wasm overrides",
         "file": "package.json",
-        "sha256": "e5693bd64203b7c4760877e993b70d2678b1f74a902ff47ac5c32d40ee25c692",
+        "sha256": "47a51b5736084e594e8adadaab79bf136f6ea8205d1270d64a1a6a86ce854201",
         "marker": "@ruvector/rvf-wasm",
         "markerVerified": true
       },
@@ -141,7 +141,7 @@
         "id": "#1721",
         "desc": "postinstall copies all dist/src/* siblings",
         "file": "v3/@claude-flow/cli/package.json",
-        "sha256": "6f7e7e1a5e7033f8a870e4c60753735fdbc104f1dd39d0ed163a1c562b1aadef",
+        "sha256": "72e93fca83fb6c1d0d8d6d4b5a4dde98e63480ed726173ba5e5fde917c705caf",
         "marker": "postinstall.cjs",
         "markerVerified": true
       },
@@ -445,7 +445,7 @@
         "id": "CAP-MCP-wasm-agent-tools",
         "desc": "MCP tools (10): wasm_agent_create, wasm_agent_export, wasm_agent_files, …",
         "file": "v3/@claude-flow/cli/dist/src/mcp-tools/wasm-agent-tools.js",
-        "sha256": "54e830ce9f2cf58a154f88c00346dcff0cc9d6cfc0115764c933fb8003a345f0",
+        "sha256": "e7fa8828d05c3ac258fe4e2f159d62458ff6777f30c489f0224371a32c8de96d",
         "marker": "wasm_agent_create",
         "markerVerified": true
       },
@@ -461,7 +461,7 @@
         "id": "#1795",
         "desc": "umbrella package missing cli-core dep (ERR_MODULE_NOT_FOUND)",
         "file": "package.json",
-        "sha256": "e5693bd64203b7c4760877e993b70d2678b1f74a902ff47ac5c32d40ee25c692",
+        "sha256": "47a51b5736084e594e8adadaab79bf136f6ea8205d1270d64a1a6a86ce854201",
         "marker": "@claude-flow/cli-core",
         "markerVerified": true
       },
@@ -477,7 +477,7 @@
         "id": "#1791.6",
         "desc": "memory init idempotent when DB exists",
         "file": "v3/@claude-flow/cli/dist/src/memory/memory-initializer.js",
-        "sha256": "6e576455073673058f7e55607e700897b1b8469bcb56b1f03b053381364611ca",
+        "sha256": "079b9b5e68225bb0514d4a6cdb79eecc187b54cddb51e1afd367ba3806cc1db5",
         "marker": "alreadyExists",
         "markerVerified": true
       },
@@ -629,7 +629,7 @@
         "id": "#1825",
         "desc": "hotfix: workspace: protocol leak in cli optionalDependencies",
         "file": "v3/@claude-flow/cli/package.json",
-        "sha256": "6f7e7e1a5e7033f8a870e4c60753735fdbc104f1dd39d0ed163a1c562b1aadef",
+        "sha256": "72e93fca83fb6c1d0d8d6d4b5a4dde98e63480ed726173ba5e5fde917c705caf",
         "marker": "\"@claude-flow/memory\": \"^3.0.0-alpha.",
         "markerVerified": true
       },
@@ -933,7 +933,7 @@
         "id": "ADR-129-P2",
         "desc": "ADR-129 Phase 2: wasm_agent_compose tool + addMcpTools bridge — RVF containers now carry an explicit MCP-tool allowlist with destructive-tool gate (DESTRUCTIVE_TOOL_PATTERNS). Composed agents declare which of Ruflo's 314 MCP tools they need (principle of least privilege).",
         "file": "v3/@claude-flow/cli/dist/src/mcp-tools/wasm-agent-tools.js",
-        "sha256": "54e830ce9f2cf58a154f88c00346dcff0cc9d6cfc0115764c933fb8003a345f0",
+        "sha256": "e7fa8828d05c3ac258fe4e2f159d62458ff6777f30c489f0224371a32c8de96d",
         "marker": "ADR-129 P2 — Destructive-tool gate",
         "markerVerified": true
       },
@@ -941,7 +941,7 @@
         "id": "ADR-129-P3",
         "desc": "ADR-129 Phase 3: 10 gallery CRUD tools (wasm_gallery_load_rvf, wasm_gallery_configure, wasm_gallery_categories, wasm_gallery_list_by_category, wasm_gallery_add_custom, wasm_gallery_remove_custom, wasm_gallery_import, wasm_gallery_export, wasm_gallery_active, wasm_gallery_config) + 6 agent introspection tools. wasm_gallery_import has AIDefence prompt-injection gate.",
         "file": "v3/@claude-flow/cli/dist/src/mcp-tools/wasm-agent-tools.js",
-        "sha256": "54e830ce9f2cf58a154f88c00346dcff0cc9d6cfc0115764c933fb8003a345f0",
+        "sha256": "e7fa8828d05c3ac258fe4e2f159d62458ff6777f30c489f0224371a32c8de96d",
         "marker": "ADR-129 P3 — Gallery CRUD tools",
         "markerVerified": true
       },
@@ -949,7 +949,7 @@
         "id": "ADR-129-P4",
         "desc": "ADR-129 Phase 4: includePlugins parameter on wasm_agent_compose auto-wires skills from plugins that declare rvagent.exposeSkillsAsTools in their plugin.json. Missing plugins emit a warning and are skipped (graceful no-op).",
         "file": "v3/@claude-flow/cli/dist/src/mcp-tools/wasm-agent-tools.js",
-        "sha256": "54e830ce9f2cf58a154f88c00346dcff0cc9d6cfc0115764c933fb8003a345f0",
+        "sha256": "e7fa8828d05c3ac258fe4e2f159d62458ff6777f30c489f0224371a32c8de96d",
         "marker": "ADR-129 P4: auto-wire plugin skills",
         "markerVerified": true
       }
@@ -957,10 +957,10 @@
   },
   "integrity": {
     "manifestHashAlgo": "sha256",
-    "manifestHash": "c13251c0f96fa30d177dd972eb3b9581873448351e040e81e8fdb5027755b48e",
+    "manifestHash": "4780b2918fe2368e68a2373cef7379f7971b88d00f5ea5bc04236ab7da2764a1",
     "signatureAlgo": "ed25519",
-    "publicKey": "a0dafd71f06396719c3689065572b8f5d7224fd280c4d0d8d1585f8ac15bce12",
-    "signature": "12a31e70747ca78c5a1ceb2cb16fc6b9da3d9333a705981c255df63d53d261a10003eb50a3563030c95549e4de8b9fd2ddb316cbe87f3a2f00baa95ca1ce6900",
+    "publicKey": "e3b681efa932f80ed44dcb4551b3b753bd6d740e62db0f42d73d318ecc80ee37",
+    "signature": "5a2c92b1f73a714410a6261f8e47cf99cb0870e3e97a1c699044f23deb9c0b8c8adfa89c906c111f9ffcc1d36f911213b144a4f95f2a7d3c908240c9bc580f0c",
     "seedDerivation": "sha256(gitCommit + ':ruflo-witness/v1')"
   }
 }
