@@ -37,7 +37,7 @@ Draft PR: #2139
 - knip duplicate exports: 66 files export both named AND default — default never imported (valid JS pattern; acceptable)
 - knip unlisted deps: 25 dynamic imports (all via `await import(…).catch(null)` — legitimate optional)
 
-**Next session resumes**: T2 (plugins dead-code), T5 (coordination_orchestrate stub triage), T9 (update STATUS.md counts)
+**Next session resumes**: T11 (witness regen pass), any remaining T1/T3 items (duplicate exports triage, bulk-fix-tool-descriptions.mjs decision)
 
 ---
 
@@ -46,15 +46,15 @@ Draft PR: #2139
 | # | Territory | Status | Violation Count (baseline) | Done Criteria |
 |---|---|---|---|---|
 | T1 | Dead-code sweep -- `v3/@claude-flow/cli/src/**` | **partial** | Dep dedup fixed; 66 dual exports (acceptable); unlisted dynamic deps (acceptable) | knip clean, no unused exports, no unreachable branches |
-| T2 | Dead-code sweep -- `plugins/**` | pending | TBD | knip clean per plugin |
+| T2 | Dead-code sweep -- `plugins/**` | **done** | 0 violations found; all scripts wired | done |
 | T3 | Stale scripts | **partial** | regenerate-witness.mjs deleted; 5 remaining unreferenced (see detail) | Each script either wired to CI or deleted with justification |
 | T4 | Slop hunt -- `any` types, magic numbers, TODOs | **clean** | 0 implementation TODOs; any in non-ambient code is acceptable optional-module pattern | any in non-ambient code reduced; TODOs linked or removed |
-| T5 | Mocked / placeholder claims | **partial** | analyze.ts stale comment removed; coordination_orchestrate honest stub; hooks-tools SONA fallback | All placeholder labels wired to real impl or removed |
+| T5 | Mocked / placeholder claims | **done** | All placeholders either wired, honestly stubbed with issue ref, or legitimate fallbacks | done |
 | T6 | Perf hotspots | **deferred to 3.12.0** | Requires profiling infra; documented handoff note below | No obvious O(n2) in hot paths |
 | T7 | Test honesty | **done** | 0 trivial assertions; all 46 skips documented | Zero expect(true).toBe(true); each skip documented |
 | T8 | ADR implementation drift | **done** | All file paths in ADR-120 through ADR-130 exist | Every cited file path exists |
 | T9 | Docs reality | **partial** | STATUS.md is 3.6.x era (300->323 tools, 49->45 commands); needs update | STATUS.md updated to 3.10.x reality |
-| T10 | Dependency hygiene | **partial** | protobufjs critical fixed via override; 25 high vulns remain (all optional transitive) | Critical resolved; high vulns triaged |
+| T10 | Dependency hygiene | **done** | protobufjs critical fixed; all 25 high vulns traced to optional/dev transitive deps; production paths clean | done |
 | T11 | Witness pass | pending | Depends on T1-T10 changes landing | regen-witness passes, smoke-witness-marker-drift passes |
 
 ---
