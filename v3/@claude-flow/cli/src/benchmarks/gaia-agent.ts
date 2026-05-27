@@ -1,5 +1,5 @@
 /**
- * GAIA Agent — ADR-133-PR3
+ * GAIA Agent — ADR-133-PR3 + iter-22 quality pass
  *
  * Multi-turn Anthropic Messages API loop that drives Claude through the
  * GAIA benchmark questions using a tool-use agent pattern.
@@ -10,9 +10,23 @@
  *   2. Call Anthropic Messages API with the registered tool definitions.
  *   3. On `stop_reason === 'tool_use'`: execute all tool_use blocks in
  *      parallel, append results as a `user` turn, and repeat.
- *   4. On `stop_reason === 'end_turn'`: scan content for the final answer
- *      pattern and return the result.
+ *      3a. (Improvement A) If ALL tool results are empty/null, inject a
+ *          single-shot retry hint before the next turn so the model tries
+ *          a different approach rather than immediately giving up.
+ *   4. On `stop_reason === 'end_turn'`: try multi-pattern answer extraction
+ *      (Improvement C).  If extraction still fails and turns remain, inject
+ *      a nudge message and continue rather than returning null immediately.
  *   5. On timeout (maxTurns exceeded): return `{ timedOut: true }`.
+ *
+ * Improvements shipped in iter-22:
+ *   A — Empty-tool-result retry hint: prevents premature termination when
+ *       tools return no useful content.
+ *   B — Raised DEFAULT_MAX_TURNS to 12 and strengthened system prompt to
+ *       explicitly forbid early surrender.
+ *   C — Multi-pattern final-answer extraction (4 patterns + whole-message
+ *       fallback) handles model phrasing variation.
+ *   D — Tool-error responses already had try/catch; improved content to
+ *       explicitly suggest alternatives so model recovers instead of giving up.
  *
  * API key resolution order (mirrors resolveHfToken from gaia-loader.ts):
  *   1. `options.apiKey` (caller-supplied)
@@ -46,12 +60,40 @@ import {
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_API_VERSION = '2023-06-01';
 const DEFAULT_MODEL = 'claude-haiku-4-5';
-const DEFAULT_MAX_TURNS = 8;
+// Improvement B: raised from 8 to 12 — Sonnet mean was 4.4 turns, so 8 was
+// not the bottleneck, but extra headroom removes the cap as a confounding
+// variable in measurement and allows recovery from tool dead-ends.
+const DEFAULT_MAX_TURNS = 12;
 const DEFAULT_MAX_TOKENS_PER_TURN = 2048;
 const DEFAULT_PER_TURN_TIMEOUT_MS = 60_000;
 
-/** Pattern Claude must output to signal it has a final answer. */
+/**
+ * Improvement C — multi-pattern final-answer extraction.
+ *
+ * Patterns tried in priority order:
+ *   1. `FINAL_ANSWER: <value>`  (canonical format from system prompt)
+ *   2. `Answer: <value>` or `The answer is <value>` or similar lead-ins
+ *   3. `ANSWER: <value>` (all-caps variant)
+ *
+ * Fallback: if none match but the response is non-empty and ≤120 chars
+ * (indicating a direct, concise reply), return the trimmed last non-empty
+ * line as the answer.  This catches "Paris" / "42" / "John Smith" replies
+ * where the model answered directly without a prefix.
+ */
 const FINAL_ANSWER_RE = /FINAL_ANSWER:\s*(.+)/i;
+const ANSWER_LEAD_IN_RE =
+  /(?:^|\n)\s*(?:the\s+)?(?:final\s+)?answer(?:\s+is)?[:\s]+(.+)/i;
+const ANSWER_COLON_RE = /(?:^|\n)\s*ANSWER\s*:\s*(.+)/;
+
+/**
+ * Hint injected when all tool results are empty — Improvement A.
+ * Appended as a `user` message content item (plain string) to prompt
+ * the model to try a different strategy instead of giving up.
+ */
+const EMPTY_TOOL_RESULT_HINT =
+  'The previous tool call(s) returned no useful results. ' +
+  'Please try a different search query, a different tool, or reformulate ' +
+  'your approach before giving a final answer. Do not give up yet.';
 
 // Haiku pricing (input/output per million tokens, as of 2026-05-27).
 // Used only for smoke cost estimation — not billed here.
@@ -146,7 +188,11 @@ function buildSystemPrompt(): string {
     '   FINAL_ANSWER: <your answer here>',
     '3. Keep answers concise.  For numbers, give just the number.  For names, give just the name.',
     '4. Do not include units unless the question specifically asks for them.',
-    '5. If after all tool calls you still cannot determine the answer, output:',
+    // Improvement B: explicit anti-surrender instruction
+    '5. IMPORTANT: Answering with null, "I don\'t know", or giving up is a FAILURE.',
+    '   You MUST try at least 3 different tool queries or approaches before conceding.',
+    '   If one search returns nothing useful, rephrase the query or try a different tool.',
+    '6. Only after exhausting at least 3 distinct approaches may you output:',
     '   FINAL_ANSWER: I don\'t know',
   ].join('\n');
 }
@@ -221,16 +267,46 @@ async function callAnthropicWithTools(
 // Extract final answer from a response
 // ---------------------------------------------------------------------------
 
+/**
+ * Improvement C — multi-pattern answer extraction.
+ *
+ * Tries patterns in priority order; returns the first non-empty match.
+ * Falls back to the last non-empty line of the last text block when the
+ * response is short enough to be a direct reply (≤120 chars trimmed).
+ */
 function extractFinalAnswer(resp: AnthropicResponse): string | null {
-  for (const block of resp.content) {
-    if (block.type === 'text') {
-      const textBlock = block as TextBlock;
-      const match = FINAL_ANSWER_RE.exec(textBlock.text);
-      if (match && match[1]) {
-        return match[1].trim();
-      }
+  const textBlocks = resp.content
+    .filter((b): b is TextBlock => b.type === 'text')
+    .map((b) => b.text);
+
+  for (const text of textBlocks) {
+    // Pattern 1: canonical FINAL_ANSWER: prefix
+    const m1 = FINAL_ANSWER_RE.exec(text);
+    if (m1 && m1[1]) return m1[1].trim();
+  }
+
+  for (const text of textBlocks) {
+    // Pattern 2: "Answer: X" / "The answer is X" / "Final answer: X" variants
+    const m2 = ANSWER_LEAD_IN_RE.exec(text);
+    if (m2 && m2[1]) return m2[1].trim();
+  }
+
+  for (const text of textBlocks) {
+    // Pattern 3: all-caps ANSWER: X
+    const m3 = ANSWER_COLON_RE.exec(text);
+    if (m3 && m3[1]) return m3[1].trim();
+  }
+
+  // Pattern 4: short direct reply — take the last non-empty line of the
+  // last text block if the entire text is ≤120 chars.
+  if (textBlocks.length > 0) {
+    const lastText = textBlocks[textBlocks.length - 1].trim();
+    if (lastText && lastText.length <= 120) {
+      const lastLine = lastText.split('\n').map((l) => l.trim()).filter(Boolean).pop();
+      if (lastLine) return lastLine;
     }
   }
+
   return null;
 }
 
@@ -272,10 +348,15 @@ async function executeToolCalls(
           content: output,
         };
       } catch (err) {
+        // Improvement D: error message now explicitly suggests alternatives
+        // so the model recovers (tries another tool/query) rather than giving up.
+        const errMsg = err instanceof Error ? err.message : String(err);
         return {
           type: 'tool_result',
           tool_use_id: block.id,
-          content: `Tool error: ${err instanceof Error ? err.message : String(err)}`,
+          content:
+            `Tool "${block.name}" failed: ${errMsg}. ` +
+            `Consider trying a different tool or a different query to find this information.`,
           is_error: true,
         };
       }
@@ -354,6 +435,22 @@ export async function runGaiaAgent(
 
     if (resp.stop_reason === 'end_turn' || resp.stop_reason === 'max_tokens') {
       const finalAnswer = extractFinalAnswer(resp);
+
+      // Improvement C recovery: if extraction failed and we still have turns
+      // left, inject a nudge and continue rather than returning null now.
+      // Exception: if it's max_tokens we can't add more to this context.
+      if (finalAnswer === null && resp.stop_reason === 'end_turn' && turn < maxTurns - 1) {
+        messages.push({ role: 'assistant', content: resp.content });
+        messages.push({
+          role: 'user',
+          content:
+            'You did not provide a final answer in the required format. ' +
+            'Please either use more tools to find the answer, or provide your best answer using:\n' +
+            'FINAL_ANSWER: <your answer>',
+        });
+        continue;
+      }
+
       return {
         questionId: question.task_id,
         finalAnswer,
@@ -377,9 +474,25 @@ export async function runGaiaAgent(
       // Execute all tool calls in parallel
       const toolResults = await executeToolCalls(resp, catalogue);
 
+      // Improvement A: if ALL tool results are empty (no useful content),
+      // append the assistant turn + tool results as usual, then add a hint
+      // message in the same user turn so the model doesn't immediately surrender.
+      const allResultsEmpty = toolResults.every(
+        (r) => !r.content || r.content.trim().length === 0,
+      );
+
       // Append assistant turn (with tool_use blocks) then user turn (with results)
       messages.push({ role: 'assistant', content: resp.content });
-      messages.push({ role: 'user', content: toolResults });
+
+      if (allResultsEmpty && turn < maxTurns - 2) {
+        // Merge hint into the tool-result user turn as an extra text item.
+        // The API accepts mixed content in a user turn: tool_result blocks
+        // plus a trailing text block with the hint.
+        const hintBlock = { type: 'text' as const, text: EMPTY_TOOL_RESULT_HINT };
+        messages.push({ role: 'user', content: [...toolResults, hintBlock] });
+      } else {
+        messages.push({ role: 'user', content: toolResults });
+      }
 
       continue;
     }
