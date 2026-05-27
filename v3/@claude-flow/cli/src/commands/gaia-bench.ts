@@ -1,5 +1,5 @@
 /**
- * V3 CLI gaia-bench Command — ADR-133-PR8
+ * V3 CLI gaia-bench Command — ADR-133-PR8 + ADR-135 Track A + ADR-136 Track Q
  *
  * Runs GAIA benchmark questions through the claude-flow agent loop and
  * reports pass-rate, cost, and per-question results.
@@ -15,11 +15,11 @@
  *   {
  *     level: number,
  *     model: string,
- *     summary: { total, passed, passRate, estCostUsd },
+ *     summary: { total, passed, passRate, estCostUsd, hardnessDist? },
  *     results: [{ task_id, question, model, correct, answer, expected_output, error }]
  *   }
  *
- * Refs: ADR-133, #2165
+ * Refs: ADR-133, ADR-135, ADR-136, #2165
  */
 
 import type { Command, CommandContext, CommandResult } from '../types.js';
@@ -65,6 +65,16 @@ interface QuestionResult {
   wallMs?: number;
   inputTokens?: number;
   outputTokens?: number;
+  /** ADR-136 Track Q: predicted difficulty class when --hardness-routing is enabled. */
+  hardnessDifficulty?: string;
+  /** ADR-136 Track Q: classifier confidence (0-1). */
+  hardnessConfidence?: number;
+}
+
+interface HardnessDist {
+  easy: number;
+  medium: number;
+  hard: number;
 }
 
 interface BenchRunOutput {
@@ -77,6 +87,8 @@ interface BenchRunOutput {
     estCostUsd: number;
     meanTurns: number;
     meanWallMs: number;
+    /** ADR-136 Track Q: distribution of predicted difficulty classes (present when --hardness-routing). */
+    hardnessDist?: HardnessDist;
   };
   results: QuestionResult[];
 }
@@ -132,14 +144,32 @@ const runCommand: Command = {
     {
       name: 'max-turns',
       type: 'number',
-      description: 'Maximum agent turns per question (default: 8)',
-      default: '8',
+      description: 'Maximum agent turns per question (default: 12). Overridden per-question when --hardness-routing is enabled.',
+      default: '12',
     },
     {
       name: 'judge-model',
       type: 'string',
       description: 'Model for LLM-as-judge scoring (default: claude-sonnet-4-6)',
       default: 'claude-sonnet-4-6',
+    },
+    {
+      name: 'voting-attempts',
+      type: 'number',
+      description: 'Number of parallel attempts for majority-vote self-consistency (default: 1 = no voting). N>1 costs Nx per question. Recommended: 3. Overridden per-question when --hardness-routing is enabled.',
+      default: '1',
+    },
+    {
+      name: 'hardness-routing',
+      type: 'boolean',
+      description: 'ADR-136 Track Q: enable hardness-based compute routing. Trains a linear classifier from historical result JSONs and allocates: easy=Haiku/4t/1-attempt, medium=Sonnet/8t/1-attempt, hard=Sonnet/12t/3-vote. Overrides --max-turns and --voting-attempts per question.',
+      default: 'false',
+    },
+    {
+      name: 'hardness-verbose',
+      type: 'boolean',
+      description: 'ADR-136 Track Q: log hardness prediction for each question (requires --hardness-routing).',
+      default: 'false',
     },
   ],
   examples: [
@@ -155,6 +185,14 @@ const runCommand: Command = {
       command: 'claude-flow gaia-bench run --smoke-only --output json',
       description: 'Quick smoke test (5 fixture questions, no HF token needed)',
     },
+    {
+      command: 'claude-flow gaia-bench run --level 1 --limit 20 --models claude-haiku-4-5 --voting-attempts 3 --output json',
+      description: 'Self-consistency voting: run each question 3x, majority-vote (ADR-135 Track A, +5-10pp expected)',
+    },
+    {
+      command: 'claude-flow gaia-bench run --level 1 --models claude-sonnet-4-6 --hardness-routing --output json',
+      description: 'ADR-136 Track Q: auto-route questions to Haiku/Sonnet based on predicted difficulty',
+    },
   ],
   action: async (ctx: CommandContext): Promise<CommandResult> => {
     const level = parseInt(String(ctx.flags.level ?? '1'), 10) as 1 | 2 | 3;
@@ -166,15 +204,24 @@ const runCommand: Command = {
     // Parser converts --smoke-only to camelCase "smokeOnly"
     const smokeOnly = ctx.flags['smokeOnly'] === true || ctx.flags['smokeOnly'] === 'true' ||
       ctx.flags['smoke-only'] === true || ctx.flags['smoke-only'] === 'true';
-    // Parser converts --max-turns → maxTurns, --judge-model → judgeModel
-    const maxTurns = parseInt(String(ctx.flags['maxTurns'] ?? ctx.flags['max-turns'] ?? '8'), 10);
+    // Parser converts --max-turns to maxTurns, --judge-model to judgeModel, --voting-attempts to votingAttempts
+    // NOTE: default must match DEFAULT_MAX_TURNS in benchmarks/gaia-agent.ts (iter-22 improvement B)
+    const maxTurns = parseInt(String(ctx.flags['maxTurns'] ?? ctx.flags['max-turns'] ?? '12'), 10);
     const judgeModel = String(ctx.flags['judgeModel'] ?? ctx.flags['judge-model'] ?? 'claude-sonnet-4-6');
+    // votingAttempts=1 means no voting (backward-compat default).  N>1 routes through runGaiaAgentWithVoting.
+    const votingAttempts = parseInt(String(ctx.flags['votingAttempts'] ?? ctx.flags['voting-attempts'] ?? '1'), 10);
+    const useVoting = votingAttempts > 1;
+    // ADR-136 Track Q: hardness-based routing.
+    const hardnessRouting = ctx.flags['hardnessRouting'] === true || ctx.flags['hardnessRouting'] === 'true' ||
+      ctx.flags['hardness-routing'] === true || ctx.flags['hardness-routing'] === 'true';
+    const hardnessVerbose = ctx.flags['hardnessVerbose'] === true || ctx.flags['hardnessVerbose'] === 'true' ||
+      ctx.flags['hardness-verbose'] === true || ctx.flags['hardness-verbose'] === 'true';
 
     // Dynamic imports to avoid loading at startup.
-    // NOTE: gaia-*.ts sources are pre-compiled under dist/src/benchmarks/ only —
+    // NOTE: gaia-*.ts sources are pre-compiled under dist/src/benchmarks/ only --
     // they are NOT in the src/ include glob so TypeScript cannot resolve them
     // statically.  We resolve the absolute path from import.meta.url at runtime
-    // and cast to `any` to bypass the static-analysis check.
+    // and cast to any to bypass the static-analysis check.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const benchmarksBase = new URL('../benchmarks/', import.meta.url).href;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -183,6 +230,28 @@ const runCommand: Command = {
     const { runGaiaAgent } = (await import(benchmarksBase + 'gaia-agent.js')) as any;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { judgeAnswer } = (await import(benchmarksBase + 'gaia-judge.js')) as any;
+    // ADR-135 Track A: voting wrapper (imported when --voting-attempts > 1 OR hardness routing triggers it).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { runGaiaAgentWithVoting } = (useVoting || hardnessRouting)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ? ((await import(benchmarksBase + 'gaia-voting.js')) as any)
+      : { runGaiaAgentWithVoting: null };
+
+    // ADR-136 Track Q: hardness predictor.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let hardnessPredictor: any = null;
+    if (hardnessRouting) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { HardnessPredictor } = (await import(benchmarksBase + 'gaia-hardness/predictor.js')) as any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { loadTrainingData } = (await import(benchmarksBase + 'gaia-hardness/train-data-loader.js')) as any;
+      hardnessPredictor = new HardnessPredictor({ conservativeMode: true });
+      const trainingData = loadTrainingData([], hardnessVerbose);
+      if (trainingData.length >= 10) {
+        hardnessPredictor.train(trainingData);
+      }
+      // If < 10 examples: cold-start (medium for all) -- documented fallback.
+    }
 
     // Only print to stderr so stdout stays clean for JSON consumers
     const log = (msg: string) => {
@@ -194,15 +263,26 @@ const runCommand: Command = {
     };
 
     log('');
-    log(output.bold(`GAIA Benchmark — Level ${level}${smokeOnly ? ' [SMOKE]' : ''}`));
-    log(output.dim('─'.repeat(60)));
+    log(output.bold(`GAIA Benchmark -- Level ${level}${smokeOnly ? ' [SMOKE]' : ''}`));
+    log(output.dim('-'.repeat(60)));
     log(`Models  : ${models.join(', ')}`);
     log(`Limit   : ${limit ?? 'all'}`);
     log(`Concurrency: ${concurrency}`);
+    if (useVoting && !hardnessRouting) {
+      log(`Voting  : ${votingAttempts}x self-consistency (ADR-135 Track A) -- cost ~${votingAttempts}x per question`);
+    }
+    if (hardnessRouting) {
+      const trainedStatus = hardnessPredictor?.isTrained
+        ? 'trained (classifier active)'
+        : 'cold-start (no training data -> all medium)';
+      log(`Hardness: ADR-136 Track Q enabled -- ${trainedStatus}`);
+      log('          easy=Haiku/4t/1-attempt  medium=Sonnet/8t/1-attempt  hard=Sonnet/12t/3-vote');
+    }
     log('');
 
     // Load questions
-    let questions;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let questions: any[];
     try {
       questions = await loadGaia({ level, limit, smokeOnly });
     } catch (err) {
@@ -222,13 +302,16 @@ const runCommand: Command = {
 
     for (const model of models) {
       log(output.bold(`Running model: ${model}`));
-      log(output.dim('─'.repeat(40)));
+      log(output.dim('-'.repeat(40)));
 
       const results: QuestionResult[] = [];
       let totalInputTokens = 0;
       let totalOutputTokens = 0;
       let totalTurns = 0;
       let totalWallMs = 0;
+
+      // ADR-136 Track Q: hardness distribution tracking.
+      const hardnessDist: HardnessDist = { easy: 0, medium: 0, hard: 0 };
 
       // Process questions in batches of `concurrency`
       for (let i = 0; i < questions.length; i += concurrency) {
@@ -237,30 +320,84 @@ const runCommand: Command = {
         const batchResults = await Promise.all(
           batch.map(async (q) => {
             const qIdx = i + batch.indexOf(q) + 1;
-            log(`  [${qIdx}/${questions.length}] ${q.task_id} — ${q.question.slice(0, 60)}...`);
 
-            let agentResult;
+            // ADR-136 Track Q: predict hardness and set per-question compute budget.
+            let effectiveModel = model;
+            let effectiveMaxTurns = maxTurns;
+            let effectiveVotingAttempts = votingAttempts;
+            let predictedDifficulty: string | undefined;
+            let predictedConfidence: number | undefined;
+
+            if (hardnessRouting && hardnessPredictor) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const prediction: any = hardnessPredictor.predict(q);
+              predictedDifficulty = prediction.difficulty as string;
+              predictedConfidence = prediction.confidence as number;
+              hardnessDist[predictedDifficulty as keyof HardnessDist]++;
+
+              // Override compute budget from hardness policy.
+              const budget = prediction.budget;
+              effectiveModel = budget.model === 'haiku'
+                ? 'claude-haiku-4-5'
+                : (model.includes('sonnet') ? model : 'claude-sonnet-4-6');
+              effectiveMaxTurns = budget.maxTurns;
+              effectiveVotingAttempts = budget.votingAttempts;
+
+              if (hardnessVerbose) {
+                log(
+                  `  [${qIdx}/${questions.length}] ${q.task_id} hardness=${predictedDifficulty}` +
+                  ` conf=${((predictedConfidence ?? 0) * 100).toFixed(0)}%` +
+                  ` -> ${effectiveModel} / ${effectiveMaxTurns}t / ${effectiveVotingAttempts}-attempt`,
+                );
+              } else {
+                log(`  [${qIdx}/${questions.length}] ${q.task_id} [${predictedDifficulty}] -- ${String(q.question).slice(0, 50)}...`);
+              }
+            } else {
+              log(`  [${qIdx}/${questions.length}] ${q.task_id} -- ${String(q.question).slice(0, 60)}...`);
+            }
+
+            const useThisVoting = effectiveVotingAttempts > 1;
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            let agentResult: any;
             try {
-              agentResult = await runGaiaAgent(q, {
-                model,
-                maxTurns,
-              });
+              if (useThisVoting && runGaiaAgentWithVoting) {
+                // ADR-135 Track A: multi-attempt majority voting.
+                agentResult = await runGaiaAgentWithVoting(q, {
+                  attempts: effectiveVotingAttempts,
+                  model: effectiveModel,
+                  maxTurns: effectiveMaxTurns,
+                });
+                // Log voting metadata alongside the normal verdict line.
+                const vr = agentResult as { votingMethod?: string; agreementCount?: number };
+                log(
+                  `    vote-method=${vr.votingMethod ?? '?'}  agreement=${vr.agreementCount ?? '?'}/${effectiveVotingAttempts}`,
+                );
+              } else {
+                agentResult = await runGaiaAgent(q, {
+                  model: effectiveModel,
+                  maxTurns: effectiveMaxTurns,
+                });
+              }
             } catch (err) {
               const errorMsg = err instanceof Error ? err.message : String(err);
               log(`    ERROR: ${errorMsg}`);
               return {
                 task_id: q.task_id,
                 question: q.question,
-                model,
+                model: effectiveModel,
                 correct: false,
                 answer: null,
                 expected_output: q.final_answer,
                 error: errorMsg,
+                hardnessDifficulty: predictedDifficulty,
+                hardnessConfidence: predictedConfidence,
               } as QuestionResult;
             }
 
             // Judge the answer
-            let judgeResult;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            let judgeResult: any;
             try {
               judgeResult = await judgeAnswer(
                 { id: q.task_id, expected: q.final_answer, questionText: q.question },
@@ -288,7 +425,7 @@ const runCommand: Command = {
             return {
               task_id: q.task_id,
               question: q.question,
-              model,
+              model: effectiveModel,
               correct: judgeResult.passed,
               answer: agentResult.finalAnswer,
               expected_output: q.final_answer,
@@ -297,6 +434,8 @@ const runCommand: Command = {
               wallMs: agentResult.wallMs,
               inputTokens: agentResult.totalInputTokens,
               outputTokens: agentResult.totalOutputTokens,
+              hardnessDifficulty: predictedDifficulty,
+              hardnessConfidence: predictedConfidence,
             } as QuestionResult;
           }),
         );
@@ -325,6 +464,7 @@ const runCommand: Command = {
           estCostUsd,
           meanTurns: total > 0 ? totalTurns / total : 0,
           meanWallMs: total > 0 ? totalWallMs / total : 0,
+          ...(hardnessRouting ? { hardnessDist } : {}),
         },
         results,
       };
@@ -336,6 +476,9 @@ const runCommand: Command = {
       log(`  Est. cost : $${estCostUsd.toFixed(4)}`);
       log(`  Mean turns: ${modelOutput.summary.meanTurns.toFixed(1)}`);
       log(`  Mean time : ${(modelOutput.summary.meanWallMs / 1000).toFixed(1)}s per question`);
+      if (hardnessRouting) {
+        log(`  Hardness  : easy=${hardnessDist.easy} medium=${hardnessDist.medium} hard=${hardnessDist.hard}`);
+      }
       log('');
     }
 
@@ -351,7 +494,7 @@ const runCommand: Command = {
     } else {
       // Print summary table
       output.writeln(output.bold('Summary'));
-      output.writeln(output.dim('─'.repeat(60)));
+      output.writeln(output.dim('-'.repeat(60)));
       for (const m of allModelOutputs) {
         const pct = (m.summary.passRate * 100).toFixed(1);
         output.writeln(
@@ -372,7 +515,7 @@ const runCommand: Command = {
 
 export const gaiaBenchCommand: Command = {
   name: 'gaia-bench',
-  description: 'GAIA benchmark harness — measure agent pass-rate on real GAIA questions',
+  description: 'GAIA benchmark harness -- measure agent pass-rate on real GAIA questions',
   subcommands: [runCommand],
   examples: [
     {
@@ -382,6 +525,10 @@ export const gaiaBenchCommand: Command = {
     {
       command: 'claude-flow gaia-bench run --smoke-only',
       description: 'Quick smoke test with built-in fixture (no HF token)',
+    },
+    {
+      command: 'claude-flow gaia-bench run --level 1 --models claude-sonnet-4-6 --hardness-routing --output json',
+      description: 'ADR-136 Track Q: tiered compute routing by predicted question difficulty',
     },
   ],
 };
