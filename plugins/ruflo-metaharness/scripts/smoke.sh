@@ -170,6 +170,24 @@ if (!od.metaharness) { console.error('missing metaharness in optionalDependencie
 if (j.dependencies && j.dependencies.metaharness) { console.error('metaharness leaked into dependencies'); process.exit(1); }
 " 2>/dev/null && ok || bad "ruflo wrapper missing metaharness optionalDep"
 
+step "17f. model-router.ts wires recordPair() (ADR-150 last-mile, iter 12)"
+F="$ROOT/../../v3/@claude-flow/cli/src/ruvector/model-router.ts"
+miss=""
+[[ -f "$F" ]] || miss="$miss missing-file"
+# Lazy loader registered
+grep -q "loadParallelRecorder" "$F" || miss="$miss no-lazy-loader"
+grep -q "router-parallel-recorder" "$F" || miss="$miss no-recorder-import"
+# Env-gated (additive, off-by-default)
+grep -q "CLAUDE_FLOW_ROUTER_PARALLEL_LOG === '1'" "$F" || miss="$miss no-env-gate-in-router"
+# Call site present
+grep -q "mod.recordPair({" "$F" || miss="$miss no-recordPair-call"
+# Never-throws guarantee (ADR-150 rule #3)
+grep -qE "try \{[[:space:]]*$|\\.catch\\(" "$F" || miss="$miss no-fail-safe"
+# Both arms attributed (bandit + ser)
+grep -q "thompson-bandit" "$F" || miss="$miss no-bandit-tag"
+grep -q "metaharness-router-hybrid\|bandit-only" "$F" || miss="$miss no-ser-tag"
+[[ -z "$miss" ]] && ok || bad "$miss"
+
 step "17e. router-parallel-recorder TS module (ADR-150 SelfEvolvingRouter recording — iter 11)"
 F="$ROOT/../../v3/@claude-flow/cli/src/ruvector/router-parallel-recorder.ts"
 miss=""

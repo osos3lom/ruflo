@@ -55,6 +55,14 @@ function loadTrajectoryRecorder(): Promise<typeof import('./router-trajectory.js
   if (_trajectoryMod === null) _trajectoryMod = import('./router-trajectory.js');
   return _trajectoryMod;
 }
+// ADR-150 iter 11–12 — parallel-decision recorder for the SelfEvolvingRouter
+// promotion gate. Dynamic-imported lazily so the routing hot path never
+// pays the load cost when CLAUDE_FLOW_ROUTER_PARALLEL_LOG is unset.
+let _parallelRecorderMod: Promise<typeof import('./router-parallel-recorder.js')> | null = null;
+function loadParallelRecorder(): Promise<typeof import('./router-parallel-recorder.js')> {
+  if (_parallelRecorderMod === null) _parallelRecorderMod = import('./router-parallel-recorder.js');
+  return _parallelRecorderMod;
+}
 
 // ----------------------------------------------------------------------------
 // ADR-148 phase 2 — per-tier OpenRouter alternates. Loaded once per process
@@ -686,6 +694,35 @@ export class ModelRouter {
       };
       this.abComparisons++;
       if (abPair.disagree) this.abDisagreements++;
+
+      // ADR-150 iter 12 — opt-in parallel-decision recorder. No-op when
+      // CLAUDE_FLOW_ROUTER_PARALLEL_LOG is unset (the default), so this
+      // adds zero overhead to the default routing path. Fire-and-forget
+      // dynamic-import + recordPair; never blocks the route() return.
+      if (process.env.CLAUDE_FLOW_ROUTER_PARALLEL_LOG === '1') {
+        loadParallelRecorder().then((mod) => {
+          try {
+            mod.recordPair({
+              task,
+              bandit: {
+                pick: banditOnly.model,
+                predictedQuality: banditOnly.confidence,
+                predictedCostUsd: 0,            // bandit doesn't price; analyzer uses outcome
+                backend: 'thompson-bandit',
+              },
+              ser: {
+                pick: picked.model,
+                predictedQuality: picked.confidence,
+                predictedCostUsd: 0,
+                backend: neuralPrior ? 'metaharness-router-hybrid' : 'bandit-only',
+              },
+            });
+          } catch {
+            // ADR-150 rule #3 — never throw from the routing path.
+          }
+        }).catch(() => { /* graceful degradation */ });
+      }
+
       var pickedForResult = picked;  // eslint-disable-line no-var
     } else {
       var pickedForResult = this.selectModel(adjustedScores, complexity.score, neuralPrior ?? undefined); // eslint-disable-line no-var

@@ -1,7 +1,7 @@
 # ADR-150 — MetaHarness Integration Surfaces in `npx ruflo`
 
-**Status**: Accepted (Phase 1 shipped iters 1–3, Phase 2 partially shipped iters 4–8; SelfEvolvingRouter + KRR retrain remain)
-**Date**: 2026-06-16 (revised 2026-06-16 with implementation notes)
+**Status**: Implemented (Phase 1 ✅ iters 1–3 · Phase 2 ✅ iters 4–12 · KRR retrain pending production data)
+**Date**: 2026-06-16 (revised 2026-06-16 — twelve iterations of /loop)
 **Related**: ADR-148 (cost-optimal router lifecycle via `@metaharness/router`), ADR-149 (per-model cost-optimal routing), ADR-026 (3-tier model routing), ADR-097 (federation budget circuit breaker), ADR-124 (optional native dependencies), ADR-144 (agent-authorization-propagation)
 **External reference**: [`ruvnet/agent-harness-generator`](https://github.com/ruvnet/agent-harness-generator) — the upstream that publishes `metaharness` + `@metaharness/*`. Same author (rUv), explicitly designed around ruflo primitives.
 **Research dossier**: published as a gist (linked from the tracking issue) with full graded-evidence sourcing.
@@ -216,12 +216,26 @@ The integration shipped across eight `/loop` iterations on branch
     `.swarm/router-parallel.jsonl` matches the iter-10 analyzer's
     default `--input`.
 
-    The model-router.ts hot path needs ONE LINE added when the
-    follow-up ADR ships the dispatch-side change: `recordPair({...})`
-    inside the existing route() function alongside the bandit pick.
-    That isolated edit is now the only remaining work, and its blast
-    radius is minimal because the recorder primitive is independently
-    tested and TS-typed.
+  - **Dispatch wiring** (iter 12 — LAST MILE):
+    The one-line edit in `model-router.ts` route() shipped in iter 12.
+    Fire-and-forget `recordPair({task, bandit, ser})` inside the
+    existing `if (abEnabled)` block — same place the A/B disagreement
+    counter already lives. Env-gated by
+    `CLAUDE_FLOW_ROUTER_PARALLEL_LOG === '1'`; no-op when unset, which
+    means ZERO overhead on the default routing path. The dynamic-import
+    is lazy (one Promise per process); the recordPair call is wrapped
+    in try/catch with `.catch(() => {})` on the import promise — the
+    routing path NEVER throws, even when the optional kernel is
+    completely absent.
+
+    Both arms are attributed at the call site:
+      bandit.backend = 'thompson-bandit'
+      ser.backend    = neuralPrior ? 'metaharness-router-hybrid' : 'bandit-only'
+
+    The pipeline is now end-to-end:
+      route() → recordPair() → .swarm/router-parallel.jsonl
+                              → router-parallel-analyze.mjs
+                              → 3-criteria AND-gate verdict
 
 ### Phase-1 item #3 — Real seed corpus retraining 🔄 PENDING
 Requires production trajectory data. The pipeline is wired:
