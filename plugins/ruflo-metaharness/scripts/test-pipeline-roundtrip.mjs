@@ -387,6 +387,61 @@ try {
   assert(dfhDriftRun.status === 1,
     `Stage 9: drift-from-history exit=1 when alert triggered (got ${dfhDriftRun.status})`);
 
+  // ──────────────────────────────────────────────────────────────
+  // STAGE 10 (iter 76) — introduced/cleared findings diff actually works
+  //
+  // Iter 49 documented that mcp-scan emitted text only → audit-trend's
+  // findings.introducedCount was dead code. Iter 50 added the parser
+  // so findings ARE populated. But no test verified the diff on a
+  // REAL finding-set change — Stage 7 mutates only the fingerprint
+  // (score/genome), leaving mcpScan.json.findings unchanged.
+  //
+  // This stage takes the real audit (Stage 1) and mutates ONLY
+  // mcpScan.json.findings — adds a synthetic finding to the baseline.
+  // audit-trend should report clearedCount === 1 (the synthetic
+  // disappeared in the current audit) with severity preserved.
+  // ──────────────────────────────────────────────────────────────
+  console.log('\nStage 10 — introduced/cleared findings diff (iter 76 — locks iter-50 fix)');
+  const findingsBasePath = join(tmp, 'findings-base.json');
+  const findingsMutated = JSON.parse(JSON.stringify(audit));
+  // Ensure mcpScan.json.findings exists (it should post-iter-50)
+  if (!findingsMutated.components?.mcpScan?.json?.findings) {
+    findingsMutated.components.mcpScan = findingsMutated.components.mcpScan ?? {};
+    findingsMutated.components.mcpScan.json = findingsMutated.components.mcpScan.json ?? {};
+    findingsMutated.components.mcpScan.json.findings = [];
+  }
+  // Append a synthetic finding that wouldn't appear in a fresh audit.
+  findingsMutated.components.mcpScan.json.findings.push({
+    severity: 'medium',
+    id: 'iter-76-synthetic-finding',
+    server: 'synthetic-server',
+    tool: 'synthetic-tool',
+    message: 'Stage 10 synthetic finding for clearedCount verification',
+  });
+  writeFileSync(findingsBasePath, JSON.stringify(findingsMutated));
+
+  // Diff: baseline has the synthetic, current (real audit) doesn't →
+  // expect clearedCount === 1, introducedCount === 0.
+  const findingsTrendRun = runNode('audit-trend.mjs', [
+    '--baseline', findingsBasePath,
+    '--current', basePath,  // basePath = unmodified audit
+    '--format', 'json',
+  ], 60_000);
+  const findingsTrendMatch = /\{[\s\S]*\}/.exec(findingsTrendRun.stdout);
+  assert(findingsTrendMatch !== null, 'Stage 10: audit-trend produced JSON');
+  const findingsTrend = JSON.parse(findingsTrendMatch[0]);
+
+  assert(findingsTrend.delta?.findings?.clearedCount === 1,
+    `Stage 10: clearedCount === 1 (got ${findingsTrend.delta?.findings?.clearedCount}) — iter-50 fix functional`);
+  assert(findingsTrend.delta?.findings?.introducedCount === 0,
+    `Stage 10: introducedCount === 0 (got ${findingsTrend.delta?.findings?.introducedCount})`);
+  // Cleared finding's severity preserved through the diff
+  const cleared = findingsTrend.delta?.findings?.cleared?.[0];
+  assert(cleared?.severity === 'medium',
+    `Stage 10: cleared finding severity preserved (got ${cleared?.severity})`);
+  assert(cleared?.id === 'iter-76-synthetic-finding',
+    'Stage 10: cleared finding id preserved');
+
 } finally {
   try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
 }

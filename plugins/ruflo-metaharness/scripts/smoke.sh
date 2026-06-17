@@ -191,6 +191,19 @@ grep -q "execCli(\[\s*'-y'\s*,\s*'metaharness@latest'" "$F" 2>/dev/null || \
 grep -q "cwd: opts" "$F" || miss="$miss no-cwd-passthrough"
 [[ -z "$miss" ]] && ok || bad "$miss"
 
+step "17z39. roundtrip Stage 10 — introduced/cleared findings diff functional (iter 76)"
+miss=""
+F="$ROOT/scripts/test-pipeline-roundtrip.mjs"
+grep -q "Stage 10 — introduced/cleared findings diff" "$F" 2>/dev/null || miss="$miss no-stage-10"
+grep -q "iter-76-synthetic-finding" "$F" 2>/dev/null || miss="$miss no-synthetic-finding-id"
+grep -q "clearedCount === 1" "$F" 2>/dev/null || miss="$miss no-cleared-assert"
+grep -q "introducedCount === 0" "$F" 2>/dev/null || miss="$miss no-introduced-zero-assert"
+grep -q "cleared finding severity preserved" "$F" 2>/dev/null || miss="$miss no-severity-preserved"
+grep -q "cleared finding id preserved" "$F" 2>/dev/null || miss="$miss no-id-preserved"
+# Runtime: roundtrip passes (≥51 — iter 76 took it from 46)
+node "$F" 2>&1 | grep -qE "(5[1-9]|[6-9][0-9]+) passed, 0 failed" || miss="$miss roundtrip-fewer-than-51"
+[[ -z "$miss" ]] && ok || bad "$miss"
+
 step "17z38. roundtrip Stage 9 — drift-from-history fastpath catches mutation (iter 75)"
 miss=""
 F="$ROOT/scripts/test-pipeline-roundtrip.mjs"
