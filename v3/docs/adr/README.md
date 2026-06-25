@@ -28,6 +28,7 @@ All ADRs are located in [`/v3/implementation/adrs/`](../../implementation/adrs/)
 | [ADR-020](../../implementation/adrs/ADR-020-headless-worker-integration.md) | Headless Worker Integration | Complete |
 | [ADR-046](../../implementation/adrs/ADR-046-ruflo-rebrand.md) | Dual Umbrella: claude-flow + ruflo | Accepted |
 | [ADR-047](../../implementation/adrs/ADR-047-fast-mode-integration.md) | Fast Mode Integration | Proposed |
+| [ADR-168](ADR-168-dream-cycle-performance-stateful-execution-loop.md) | Stateful Execution Loop: KV-Cache Discipline + Agent Execution Graphs | Proposed |
 
 ## Summary Documents
 
