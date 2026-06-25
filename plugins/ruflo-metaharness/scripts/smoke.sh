@@ -657,8 +657,13 @@ grep -q "metaharness drift-from-history" "$W" 2>/dev/null || miss="$miss no-cli-
 grep -q '"path": "file"' "$W" 2>/dev/null || miss="$miss no-path-file-assert"
 grep -q '"skippedAuditList": true' "$W" 2>/dev/null || miss="$miss no-skip-true-assert"
 grep -q "/tmp/drift-baseline.json" "$W" 2>/dev/null || miss="$miss no-baseline-path"
-# Iter-98 step lives in the metaharness-real-data job
-grep -B100 "Drift-from-history dispatcher round-trip" "$W" 2>/dev/null | grep -q "metaharness-real-data:" \
+# Iter-98 step lives in the metaharness-real-data job. The brittle
+# fixed-window lookback (-B100) broke once the job grew past 100 lines;
+# instead use awk to find the most recent top-level job header above
+# the step and check it is metaharness-real-data.
+last_job=$(awk '/^  [a-zA-Z_-]+:[[:space:]]*$/ { last=$0 }
+                /Drift-from-history dispatcher round-trip/ { print last; exit }' "$W" 2>/dev/null)
+echo "$last_job" | grep -q "metaharness-real-data:" \
   || miss="$miss not-in-real-data-job"
 [[ -z "$miss" ]] && ok || bad "$miss"
 
@@ -737,8 +742,10 @@ for t in $TOOLS; do
   grep -q "mcp__claude-flow__${t}" "$CMD" 2>/dev/null \
     || miss="$miss ${t}-not-in-claude-md"
 done
-# Lock count: 9 MCP tools (mint deliberately excluded — see iter 73)
-[[ "$COUNT" == "9" ]] || miss="$miss mcp-tool-count-stale:$COUNT-expected-9"
+# Lock count: 12 MCP tools (mint deliberately excluded — see iter 73).
+# Bumped from 9 → 12 after ADR-153 added metaharness_bench,
+# metaharness_evolve, and metaharness_security_bench.
+[[ "$COUNT" == "12" ]] || miss="$miss mcp-tool-count-stale:$COUNT-expected-12"
 [[ -z "$miss" ]] && ok || bad "$miss"
 
 step "17z55. MCP enum + SEVERITY_RANK vocabulary aligned (iter 92)"
@@ -813,8 +820,9 @@ for f in $REFS; do
   COUNT=$((COUNT + 1))
   [[ -f "$SCRIPTS_DIR/$f" ]] || miss="$miss mcp-script-${f}-missing"
 done
-# Should be 9 unique scripts (one per MCP tool; mint deliberately excluded)
-[[ "$COUNT" == "9" ]] || miss="$miss mcp-script-count-stale:$COUNT-expected-9"
+# Should be 12 unique scripts (one per MCP tool; mint deliberately excluded).
+# Bumped from 9 → 12 after ADR-153 added bench/evolve/security_bench tools.
+[[ "$COUNT" == "12" ]] || miss="$miss mcp-script-count-stale:$COUNT-expected-12"
 [[ -z "$miss" ]] && ok || bad "$miss"
 
 step "17z52. SUBCOMMANDS map entries point at existing script files (iter 89)"
@@ -1618,9 +1626,10 @@ step "17z9. MCP success-semantic footnote + audit_trend file inputs (iter 46)"
 miss=""
 WRAPPER="$ROOT/../../v3/@claude-flow/cli/src/mcp-tools/metaharness-tools.ts"
 # Success-semantic constant declared + appended to N descriptions = N+1 occurrences.
-# Iter 46 set this at 9 (8 tools); iter 54 added the 9th tool → expect 10.
+# Iter 46 set this at 9 (8 tools); iter 54 added the 9th → 10. ADR-153
+# added 3 more tools (bench/evolve/security_bench) → 1 + 12 = 13.
 COUNT=$(grep -c "MCP_SUCCESS_SEMANTIC" "$WRAPPER" 2>/dev/null; true)
-[[ "$COUNT" == "10" ]] || miss="$miss footnote-count:$COUNT-expected-10"
+[[ "$COUNT" == "13" ]] || miss="$miss footnote-count:$COUNT-expected-13"
 # audit_trend now exposes baselineFile / currentFile
 grep -q "baselineFile" "$WRAPPER" 2>/dev/null || miss="$miss no-baseline-file"
 grep -q "currentFile" "$WRAPPER" 2>/dev/null || miss="$miss no-current-file"
@@ -1658,8 +1667,9 @@ grep -q "success = exitCode === 0" "$WRAPPER" 2>/dev/null || miss="$miss no-exit
 COUNT_OLD=$(grep -c "success: !r.degraded" "$WRAPPER" 2>/dev/null; true)
 [[ "$COUNT_OLD" == "0" ]] || miss="$miss old-pattern-still-present:$COUNT_OLD"
 COUNT_NEW=$(grep -c "success: r.success" "$WRAPPER" 2>/dev/null; true)
-# Iter 54 added a 9th tool. Future iters that add tools should bump this.
-[[ "$COUNT_NEW" == "9" ]] || miss="$miss new-pattern-count:$COUNT_NEW-expected-9"
+# Iter 54 added a 9th tool → 9. ADR-153 added 3 more (bench, evolve,
+# security_bench) → 12. Future iters that add tools should bump this.
+[[ "$COUNT_NEW" == "12" ]] || miss="$miss new-pattern-count:$COUNT_NEW-expected-12"
 # Runtime anchors: iter 44 success assertions present
 T="$ROOT/scripts/test-mcp-tools.mjs"
 grep -q "iter 44 fix" "$T" 2>/dev/null || miss="$miss no-iter44-anchors"
@@ -2017,12 +2027,13 @@ grep -q "result has 'success'" "$F" || miss="$miss no-success-assertion"
 grep -q "result has 'data'" "$F" || miss="$miss no-data-assertion"
 grep -q "result has 'degraded'" "$F" || miss="$miss no-degraded-assertion"
 grep -q "result has 'exitCode'" "$F" || miss="$miss no-exitcode-assertion"
-# All 9 tool names enumerated (similarity iter 36, drift_from_history iter 54)
-for tool in metaharness_score metaharness_genome metaharness_mcp_scan metaharness_threat_model metaharness_oia_audit metaharness_audit_list metaharness_audit_trend metaharness_similarity metaharness_drift_from_history; do
+# All 12 tool names enumerated (similarity iter 36, drift_from_history iter 54,
+# ADR-153 added bench/evolve/security_bench)
+for tool in metaharness_score metaharness_genome metaharness_mcp_scan metaharness_threat_model metaharness_oia_audit metaharness_audit_list metaharness_audit_trend metaharness_similarity metaharness_drift_from_history metaharness_bench metaharness_evolve metaharness_security_bench; do
   grep -q "${tool}" "$F" || miss="$miss missing-${tool}"
 done
-# Count assertion must match iter-54 expansion (8 → 9)
-grep -q "tools.length === 9" "$F" || miss="$miss tool-count-assertion-stale"
+# Count assertion must match iter-54 expansion (8 → 9), then ADR-153 (9 → 12)
+grep -q "tools.length === 12" "$F" || miss="$miss tool-count-assertion-stale"
 # Graceful skip when dist absent (so the script is smoke-runnable pre-build)
 grep -q "SKIPPED" "$F" || miss="$miss no-skip-doc"
 [[ -z "$miss" ]] && ok || bad "$miss"

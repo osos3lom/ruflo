@@ -128,6 +128,13 @@ async function testEdgeInsert() {
     const count = await countGraphEdges(dbPath);
     assert(count === 1, `2b: graph_edges has 1 row (found ${count})`);
 
+    // Close the better-sqlite3 connection so its WAL is checkpointed back
+    // into the main DB file before we re-read via sql.js (#2431 added WAL
+    // mode for cross-connection safety; without this checkpoint, sql.js
+    // sees only the pre-insert main file and the inserted rows live in
+    // the .db-wal sidecar).
+    _resetBridgeDb();
+
     // Verify embedding_ref is inline-encoded
     const SQL = await loadSqlJs();
     const fileBuffer = fs.readFileSync(dbPath);
@@ -172,6 +179,9 @@ async function testLegacyIdPrefix() {
       dbPath,
     });
     assert(ok, '3a: insertGraphEdge with mem:-prefixed IDs succeeds');
+
+    // Checkpoint WAL → main DB before re-reading via sql.js (#2431).
+    _resetBridgeDb();
 
     // Verify row exists with the prefixed IDs
     const SQL = await loadSqlJs();
@@ -261,6 +271,12 @@ async function testTableAutoCreate() {
       dbPath: oldDbPath,
     });
     assert(ok, '5a: insertGraphEdge succeeds on DB without graph_edges');
+
+    // Checkpoint WAL → main DB before re-reading via sql.js (#2431).
+    // Without this, sql.js sees only the pre-insert main file (just
+    // memory_entries) and the auto-created graph_edges table sits in
+    // the .db-wal sidecar, failing assertion 5b.
+    _resetBridgeDb();
 
     // Verify table was created
     const fileBuffer = fs.readFileSync(oldDbPath);
