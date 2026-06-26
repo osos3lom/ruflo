@@ -48,7 +48,7 @@ const BASELINES_BY_DATASET = {
 // Iter 4: nfcorpus medical IR — downweight BM25 (0.7) to favor dense semantics over lexical noise.
 const DATASET_RRF_WEIGHTS = {
   arguana: { dense: 1.5, bm25: 1.0 },  // symmetric retrieval favors dense; boost it over weak BM25
-  nfcorpus: { dense: 1.0, bm25: 0.7 }, // medical IR: dense semantics > BM25 keywords; reduce BM25 contribution
+  nfcorpus: { dense: 1.0, bm25: 0.4 }, // iter 11: aggressive BM25 dampening (0.7→0.4) to favor dense semantics
 };
 function detectDataset(path) {
   const p = path.toLowerCase();
