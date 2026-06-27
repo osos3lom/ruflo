@@ -93,7 +93,7 @@ Claude Code Auto-Memory (~/.claude/projects/*/memory/*.md)
         └── claude-memories namespace
         │
         ▼ (HNSW ANN index)
-    Semantic Search (150x-12,500x faster)
+    Semantic Search (HNSW ANN — measured ~1.9x at N=20k vs brute force; see docs/reviews/intelligence-system-audit-2026-05-29.md)
 ```
 
 ## Encryption at rest (ruflo 3.6.25+)
@@ -167,12 +167,15 @@ npx @claude-flow/cli@latest memory search --query "auth security" --limit 5
 
 ## HNSW Performance
 
-| Operation | Latency | vs Brute Force |
-|-----------|---------|----------------|
-| Vector search (100 entries) | ~0.01ms | 150x faster |
-| Vector search (10k entries) | ~0.05ms | 2,500x faster |
-| Vector search (100k entries) | ~0.1ms | 12,500x faster |
-| Store + index | ~1ms | — |
+Measured numbers from [`docs/reviews/intelligence-system-audit-2026-05-29.md`](../../docs/reviews/intelligence-system-audit-2026-05-29.md) + [`scripts/benchmark-intelligence.mjs`](../../scripts/benchmark-intelligence.mjs):
+
+| Operation | vs Brute Force | Notes |
+|-----------|----------------|-------|
+| Vector search (N=5k) | ~3.2x–4.7x faster | ruvector NAPI, recall@10 ~0.99 |
+| Vector search (N=20k) | ~1.9x faster | ANN wins above crossover |
+| Vector search (below crossover) | ties/loses | brute force preferred for small N |
+
+The previously published "150x–12,500x" figures were brute-force fallback artifacts and are not reproduced under the audit harness.
 
 ## Integration with ruvector
 
