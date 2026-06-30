@@ -4,7 +4,7 @@ Neural trading strategies powered by [`neural-trader`](https://www.npmjs.com/pac
 
 ## Overview
 
-Wraps the `neural-trader` npm package as a Ruflo plugin with 4 specialized agents, 7 skills, and comprehensive CLI commands. Adds AgentDB memory persistence, SONA trajectory learning, and swarm-coordinated execution on top of neural-trader's Rust/NAPI engine.
+Wraps the `neural-trader` npm package as a Ruflo plugin with 4 specialized agents, 9 skills, and comprehensive CLI commands. Adds AgentDB memory persistence, SONA trajectory learning, and swarm-coordinated execution on top of neural-trader's Rust/NAPI engine.
 
 Heavy jobs — multi-year walk-forward backtests, large Monte-Carlo runs, parameter sweeps, LSTM/Transformer/N-BEATS training — can be dispatched to an Anthropic Managed Agent **cloud container** instead of running locally: see the `trader-cloud-backtest` skill, the `/trader cloud <backtest|train|sweep>` command, and [ADR-117](../../v3/docs/adr/ADR-117-neural-trader-managed-agent-backtests.md) (built on the `managed_agent_*` runtime from the `ruflo-agent` plugin / [ADR-115](../../v3/docs/adr/ADR-115-managed-agents-rvagent-backend.md); needs `ANTHROPIC_API_KEY` + Managed Agents beta — degrades to the local `trader-backtest` skill without it).
 
@@ -78,6 +78,8 @@ claude mcp add neural-trader -- npx neural-trader mcp start
 | `trader-train` | `/trader-train lstm --symbol TSLA` | Train neural prediction models |
 | `trader-risk` | `/trader-risk [--symbol AAPL]` | VaR, position sizing, circuit breaker status |
 | `trader-cloud-backtest` | `/trader cloud backtest <strategy> --symbol SPY` | Dispatch a heavy backtest / training / sweep to an Anthropic Managed Agent cloud container ([ADR-117](../../v3/docs/adr/ADR-117-neural-trader-managed-agent-backtests.md)) |
+| `trader-explain` | `/trader-explain --signal <id>` | Regulator-grade feature attribution for LSTM/Transformer signals via single-entry PageRank (ADR-126 Phase 6 / ADR-123) |
+| `trader-portfolio-cg` | `/trader-portfolio-cg [--risk-target 0.15]` | Mean-variance portfolio optimization via Conjugate Gradient — 40-60× faster than the legacy Neumann path (ADR-126 Phase 3 / ADR-123 Wedge 8) |
 | `trader-portfolio-cg` | `/trader-portfolio-cg [--portfolio-id ID]` | Conjugate-Gradient mean-variance solve via `mcp__ruflo-sublinear__solve` — 40-60× faster than the legacy Neumann path ([ADR-126 Phase 3](../../v3/docs/adr/ADR-126-neural-trader-substrate-integration.md), [ADR-123 Wedge 8](../../v3/docs/adr/ADR-123-sublinear-integration.md)) |
 | `trader-explain` | `/trader-explain <signalId> [--top-k 10] [--seed 42]` | Regulator-grade feature attribution via single-entry PageRank — ranks the top-K features that drove an LSTM/Transformer signal; reproducible across runs ([ADR-126 Phase 6](../../v3/docs/adr/ADR-126-neural-trader-substrate-integration.md)) |
 

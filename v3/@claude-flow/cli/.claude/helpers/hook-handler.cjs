@@ -49,23 +49,27 @@ const intelligence = safeRequire(path.join(helpersDir, 'intelligence.cjs'));
 
 // ── Intelligence timeout protection (fixes #1530, #1531) ───────────────────
 const INTELLIGENCE_TIMEOUT_MS = 3000;
+// Race the (possibly-async) work against a real timeout. The previous version
+// called fn() and clearTimeout(timer) immediately, so an async fn returned a
+// pending promise that resolved THROUGH the race — the timeout protected
+// nothing. This settles on whichever finishes first, then clears the timer.
+//
+// LIMITATION: a synchronous blocking fn (the current intelligence.init() does
+// blocking fs reads) cannot be interrupted by any in-process timer — the event
+// loop is blocked. The real guard for that case is the readJSON file-size
+// limit in intelligence.cjs. This util only bounds work that yields (async I/O).
 function runWithTimeout(fn, label) {
-  // For synchronous blocking calls, we use a global safety timer.
-  // The readJSON file-size guard prevents loading huge files, but this
-  // is an additional safety net.
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => {
       process.stderr.write("[WARN] " + label + " timed out after " + INTELLIGENCE_TIMEOUT_MS + "ms, skipping\n");
       resolve(null);
     }, INTELLIGENCE_TIMEOUT_MS);
-    try {
-      const result = fn();
-      clearTimeout(timer);
-      resolve(result);
-    } catch (e) {
-      clearTimeout(timer);
-      resolve(null);
-    }
+  });
+  const work = Promise.resolve().then(fn).catch(() => null);
+  return Promise.race([work, timeout]).then((result) => {
+    clearTimeout(timer);
+    return result;
   });
 }
 

@@ -26,7 +26,7 @@ npm run lint       # eslint (typescript-eslint)
 node dist/cli.js demo                                   # tournament + evolution + co-evolution
 node dist/cli.js tournament --game pd --rounds 200 --seed 1
 node dist/cli.js arena --a tit-for-tat --b always-defect
-node dist/cli.js evolve --game pd --generations 400 --seed 42
+node dist/cli.js evolve --game pd --generations 300 --seed 42
 node dist/cli.js coevolve --game pd --generations 400 --seed 7
 ```
 

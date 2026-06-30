@@ -3,7 +3,8 @@
 // dangling refs, supersede cycles, and status mismatches.
 //
 // Companion to scripts/import.mjs. Run after import to validate graph integrity.
-// Useful in CI: exits with code 1 if any issues found (gate on graph health).
+// Useful in CI: exits with code 1 on supersede cycles by default, or on ANY
+// issue (dangling refs, status mismatches) when VERIFY_STRICT=1 is set.
 //
 // Usage:
 //   node scripts/verify.mjs                     # markdown report

@@ -25,3 +25,15 @@ export { wasmAgentTools } from './wasm-agent-tools.js';
 export { ruvllmWasmTools } from './ruvllm-tools.js';
 export { guidanceTools } from './guidance-tools.js';
 export { autopilotTools } from './autopilot-tools.js';
+// ADR-150 — MetaHarness MCP tools (score / genome / mcp-scan / threat-model / oia-audit)
+export { metaharnessTools } from './metaharness-tools.js';
+// ADR-175-inspired — Test-Driven Repair via headless `claude -p`
+export { testgenTools } from './testgen-tools.js';
+// agenticow@~0.2.3 — Copy-On-Write memory branching (162-byte branches)
+export { agenticowTools } from './agenticow-tools.js';
+// ADR-164 — AgentBBS federated business-domain BBS rooms (Phase 1)
+export { agentbbsTools } from './agentbbs-tools.js';
+// ADR-164 Phase 2 — Business-pod template validation
+export { businessPodTools } from './business-pod-tools.js';
+// ADR-164 Phase 4 §5.1.8 — http_fetch (secure-by-default HTTP probe)
+export { httpFetchTools } from './http-fetch-tools.js';

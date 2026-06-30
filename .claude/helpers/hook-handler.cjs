@@ -37,20 +37,35 @@ const intelligence = safeRequire(path.join(helpersDir, 'intelligence.cjs'));
 
 // ── Intelligence timeout protection (fixes #1530, #1531) ───────────────────
 var INTELLIGENCE_TIMEOUT_MS = 3000;
+// Race the (possibly-async) work against a real timeout.
+//
+// The previous implementation called `fn()` and then `clearTimeout(timer)`
+// immediately — but if `fn()` returns a *pending* promise (async work), the
+// timer was cancelled before the work settled and the promise resolved with the
+// still-pending promise, so the timeout protected nothing. This version only
+// settles when the work resolves OR the timeout fires, whichever comes first,
+// and clears the timer afterwards.
+//
+// LIMITATION (be honest): a *synchronous* CPU-bound `fn` (e.g. the current
+// intelligence.init(), which does blocking fs reads) cannot be interrupted by
+// any in-process timer — the event loop is blocked, so the timeout callback
+// can't run until `fn` already returned. The real guard for that case lives in
+// intelligence.cjs (MAX_DATA_FILE_SIZE / MAX_GRAPH_NODES caps). This util only
+// bounds work that yields to the event loop (async I/O, dynamic import, etc.).
 function runWithTimeout(fn, label) {
-  return new Promise(function(resolve) {
-    var timer = setTimeout(function() {
+  var timer;
+  var timeout = new Promise(function(resolve) {
+    timer = setTimeout(function() {
       process.stderr.write("[WARN] " + label + " timed out after " + INTELLIGENCE_TIMEOUT_MS + "ms, skipping\n");
       resolve(null);
     }, INTELLIGENCE_TIMEOUT_MS);
-    try {
-      var result = fn();
-      clearTimeout(timer);
-      resolve(result);
-    } catch (e) {
-      clearTimeout(timer);
-      resolve(null);
-    }
+  });
+  // Promise.resolve().then(fn) turns a synchronous throw into a rejection so it
+  // is handled here rather than escaping the Promise constructor.
+  var work = Promise.resolve().then(fn).catch(function() { return null; });
+  return Promise.race([work, timeout]).then(function(result) {
+    clearTimeout(timer);
+    return result;
   });
 }
 
@@ -261,9 +276,16 @@ if (command && handlers[command]) {
   }
 }
 
-main().catch(function(e) {
-  console.log('[WARN] Hook handler error: ' + e.message);
-}).finally(function() {
-  // Ensure clean exit for Claude Code hooks
-  process.exit(0);
-});
+// Only dispatch hooks when run directly (node hook-handler.cjs ...). When
+// require()'d by a test, just expose the internals so they can be unit-tested
+// without triggering stdin reads / process.exit.
+if (require.main === module) {
+  main().catch(function(e) {
+    console.log('[WARN] Hook handler error: ' + e.message);
+  }).finally(function() {
+    // Ensure clean exit for Claude Code hooks
+    process.exit(0);
+  });
+}
+
+module.exports = { runWithTimeout: runWithTimeout, INTELLIGENCE_TIMEOUT_MS: INTELLIGENCE_TIMEOUT_MS };

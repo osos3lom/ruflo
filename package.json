@@ -1,6 +1,6 @@
 {
   "name": "claude-flow",
-  "version": "3.10.46",
+  "version": "3.16.2",
   "description": "Ruflo - Enterprise AI agent orchestration for Claude Code. Deploy 60+ specialized agents in coordinated swarms with self-learning, fault-tolerant consensus, vector memory, and MCP integration",
   "main": "dist/index.js",
   "type": "module",
@@ -35,6 +35,10 @@
     ".claude/**",
     "!.claude/**/*.db",
     "!.claude/**/*.map",
+    "!.claude/worktrees/**",
+    "!.claude/projects/**",
+    "!.claude/scheduled_tasks.lock",
+    "!.claude/sessions/**",
     "README.md",
     "LICENSE"
   ],
@@ -54,14 +58,14 @@
     "v3:security": "npm run security:audit && npm run security:test"
   },
   "dependencies": {
-    "@claude-flow/cli-core": "^3.7.0-alpha.5",
-    "@claude-flow/mcp": "^3.0.0-alpha.8",
-    "@claude-flow/neural": "^3.0.0-alpha.8",
-    "@claude-flow/shared": "^3.0.0-alpha.7",
-    "@noble/ed25519": "^2.1.0",
-    "@ruvector/rabitq-wasm": "^0.1.0",
-    "semver": "^7.6.0",
-    "zod": "^3.22.4"
+    "@claude-flow/cli-core": "3.7.0-alpha.5",
+    "@claude-flow/mcp": "3.0.0-alpha.9",
+    "@claude-flow/neural": "3.0.0-alpha.9",
+    "@claude-flow/shared": "3.0.0-alpha.8",
+    "@noble/ed25519": "2.3.0",
+    "@ruvector/rabitq-wasm": "0.1.0",
+    "semver": "7.7.3",
+    "zod": "3.25.76"
   },
   "optionalDependencies": {
     "@claude-flow/codex": "^3.0.0-alpha.8",
@@ -71,20 +75,20 @@
     "@ruvector/router": "^0.1.30",
     "@ruvector/router-linux-x64-gnu": "^0.1.30",
     "@ruvector/sona": "^0.1.5",
-    "agentdb": "^3.0.0-alpha.16",
-    "agentic-flow": "^2.0.13"
+    "agentdb": "^3.0.0-alpha.17",
+    "agentic-flow": "^2.0.14"
   },
   "overrides": {
     "ruvector": "^0.2.27",
     "better-sqlite3": ">=12.8.0",
-    "hono": ">=4.11.4",
+    "hono": ">=4.12.25",
     "@ruvector/rvf-wasm": "0.1.5",
-    "@hono/node-server": ">=1.19.10",
+    "@hono/node-server": ">=1.19.14",
     "flatted": ">=3.4.0",
     "tar": ">=7.5.11",
     "picomatch": ">=4.0.3",
     "path-to-regexp": ">=8.2.1",
-    "undici": ">=7.18.0",
+    "undici": ">=8.5.0",
     "minimatch": ">=10.0.0",
     "@isaacs/brace-expansion": ">=5.0.1",
     "cacache": ">=20.0.0",
@@ -102,8 +106,11 @@
     "@opentelemetry/exporter-prometheus": ">=0.217.0",
     "axios": ">=1.13.2",
     "fast-uri": ">=3.1.0",
-    "vite": ">=6.4.6",
-    "ws": ">=8.18.4"
+    "vite": ">=8.0.16",
+    "ws": ">=8.21.0",
+    "@grpc/grpc-js": ">=1.14.4",
+    "form-data": ">=4.0.6",
+    "http-proxy-middleware": ">=3.0.7"
   },
   "devDependencies": {
     "@openai/codex": "^0.98.0",
@@ -112,7 +119,7 @@
     "eslint": "^8.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.0.0",
-    "vitest": "^1.0.0"
+    "vitest": "^3.2.6"
   },
   "engines": {
     "node": ">=20.0.0"

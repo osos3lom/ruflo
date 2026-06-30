@@ -131,6 +131,48 @@ const KNOWN_ESCAPE_HATCHES = new Set([
   'NODE_ENV',
   'PROMPT',
   'TOOL_INPUT_command',
+
+  // ── Router (ADR-130/148/149) operator knobs ─────────────────────────────────
+  // These configure ruflo's neural-router/bandit/trajectory subsystems and
+  // are intentionally env-only:
+  //   - Most are CI/benchmark knobs (KNN_K, LATENCY_BUDGET_MS, COST_CEILING),
+  //     not user-typed inputs.
+  //   - Several are feature flags (NEURAL=1, BANDIT_PER_MODEL=1, TRAJECTORY=1)
+  //     that, like CLAUDE_FLOW_V3_ENABLED above, get baked into settings
+  //     by `ruflo init` rather than passed on the command line.
+  //   - SEED_CORPUS / CALIBRATOR_PATH / MODEL_PATH are file-path inputs to
+  //     long-running daemons, not transient CLI flags.
+  // If a router knob graduates to user-facing surface, add a CLI flag override
+  // per ADR-125 and remove its entry here.
+  'CLAUDE_FLOW_ROUTER_AB',
+  'CLAUDE_FLOW_ROUTER_AB_SAMPLE_RATE',
+  'CLAUDE_FLOW_ROUTER_BANDIT_FULL_INFLUENCE',
+  'CLAUDE_FLOW_ROUTER_BANDIT_PER_MODEL',
+  'CLAUDE_FLOW_ROUTER_BANDIT_SHRINKAGE_LAMBDA',
+  'CLAUDE_FLOW_ROUTER_BANDIT_WARMUP_RANGE',
+  'CLAUDE_FLOW_ROUTER_CALIBRATE',
+  'CLAUDE_FLOW_ROUTER_CALIBRATOR_PATH',
+  'CLAUDE_FLOW_ROUTER_COST_CEILING_USD_PER_MTOK',
+  'CLAUDE_FLOW_ROUTER_EMBED_CACHE_SIZE',
+  'CLAUDE_FLOW_ROUTER_ENSEMBLE_UNCERTAINTY_THRESHOLD',
+  'CLAUDE_FLOW_ROUTER_FALLBACK_MAX_RETRIES',
+  'CLAUDE_FLOW_ROUTER_KNN_K',
+  'CLAUDE_FLOW_ROUTER_LATENCY_BUDGET_MS',
+  'CLAUDE_FLOW_ROUTER_MODEL_PATH',
+  'CLAUDE_FLOW_ROUTER_NEURAL',
+  'CLAUDE_FLOW_ROUTER_NEURAL_WEIGHT',
+  'CLAUDE_FLOW_ROUTER_OPENROUTER_ALTS',
+  'CLAUDE_FLOW_ROUTER_PARALLEL_LOG',
+  'CLAUDE_FLOW_ROUTER_PARALLEL_LOG_PATH',
+  'CLAUDE_FLOW_ROUTER_PROVIDER',
+  'CLAUDE_FLOW_ROUTER_QUALITY_BAR',
+  'CLAUDE_FLOW_ROUTER_SEED_CORPUS',
+  'CLAUDE_FLOW_ROUTER_TRAJECTORY',
+  'CLAUDE_FLOW_ROUTER_TRAJECTORY_MAXROTATIONS',
+  'CLAUDE_FLOW_ROUTER_TRAJECTORY_MAXSIZE',
+  'CLAUDE_FLOW_ROUTER_TRAJECTORY_PATH',
+  'CLAUDE_FLOW_ROUTER_TRAJECTORY_TASKLEN',
+  'CLAUDE_FLOW_SWARM_DIR',  // Set by ruflo init / inter-process — not user-typed
 ]);
 
 // ── Source directories to scan ────────────────────────────────────────────────

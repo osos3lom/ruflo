@@ -28,7 +28,19 @@ export interface AgentRecord {
   createdAt: string;
   domain?: string;
   model?: ClaudeModel;
-  modelRoutedBy?: 'explicit' | 'router' | 'codemod' | 'default';
+  modelRoutedBy?: 'explicit' | 'router' | 'codemod' | 'default' | 'hybrid';
+  /**
+   * ADR-149 — concrete picked model id (e.g. `openai/gpt-4.1`,
+   * `inclusionai/ling-2.6-flash`). Present when the cost-optimal neural
+   * router contributed to the decision; downstream `executeAgentInline`
+   * uses this to dispatch via the correct provider's API instead of
+   * falling back to MODEL_MAP[tier].
+   */
+  modelId?: string;
+  /** ADR-148 phase 2 — execution provider hint. */
+  provider?: 'anthropic' | 'openrouter';
+  /** ADR-148 phase 2 — concrete OpenRouter slug when provider='openrouter'. */
+  openrouterModel?: string;
   lastResult?: Record<string, unknown>;
 }
 
@@ -451,6 +463,13 @@ export interface AgentExecuteResult {
   durationMs?: number;
   error?: string;
   remediation?: string;
+  /**
+   * ADR-149 iter 7 — present when the request was retried after a 429/5xx
+   * via `nextCostOptimalAlternative`. Each entry records a model that
+   * was tried and failed, in attempt order. The final `model` field is
+   * the one that produced the surfaced result (success or final error).
+   */
+  fallbackHistory?: Array<{ modelId: string; error: string }>;
 }
 
 export async function executeAgentTask(input: AgentExecuteInput): Promise<AgentExecuteResult> {
@@ -459,9 +478,34 @@ export async function executeAgentTask(input: AgentExecuteInput): Promise<AgentE
   if (!agent) return { success: false, agentId: input.agentId, error: 'Agent not found' };
   if (agent.status === 'terminated') return { success: false, agentId: input.agentId, error: 'Agent has been terminated' };
 
-  // #2232 — Single source of truth so literal claude-* ids pass through
-  // instead of silently collapsing to Sonnet via the old MODEL_MAP[]||DEFAULT fold.
-  const anthropicModel = resolveAnthropicModel(agent.model || 'sonnet');
+  // ADR-149 iter 13 — first-call dispatch prefers `agent.modelId` (the
+  // cost-optimal pick from the neural backend) over `MODEL_MAP[agent.model]`
+  // when present. Before this fix the first attempt always used the tier
+  // mapping; only the iter-7 fallback chain used modelId on retry, which
+  // meant the cost-optimal pick was wasted unless the first call failed
+  // with a 429/5xx.
+  //
+  // Rules:
+  //   - agent.modelId is set AND it's a non-Anthropic slug (e.g.
+  //     'inclusionai/ling-2.6-flash', 'openai/gpt-4.1') → dispatch
+  //     directly via that id. callAnthropicMessages forwards non-Anthropic
+  //     ids through OpenRouter (#2042), so this gets us the cost-optimal
+  //     model on attempt 1.
+  //   - agent.modelId starts with 'anthropic/' → strip the prefix, use the
+  //     bare Anthropic id (e.g. 'anthropic/claude-haiku-4.5' → 'claude-haiku-4.5').
+  //   - agent.modelId is unset (no neural backend fired) → fall back to the
+  //     legacy tier-mapped MODEL_MAP path. Existing behaviour preserved.
+  let firstCallModel: string;
+  if (agent.modelId) {
+    firstCallModel = agent.modelId.startsWith('anthropic/')
+      ? agent.modelId.slice('anthropic/'.length)
+      : agent.modelId;
+  } else {
+    firstCallModel = resolveAnthropicModel(agent.model || 'sonnet');
+  }
+  // Kept for legacy error-path remediation message + final-result `model` field
+  // (returned when the request fully fails with no successful retry).
+  const anthropicModel = firstCallModel;
   const systemPrompt = input.systemPrompt ||
     `You are a ${agent.agentType} agent operating as part of a Ruflo swarm. ` +
     `Agent ID: ${input.agentId}. Domain: ${agent.domain ?? 'general'}. ` +
@@ -474,12 +518,8 @@ export async function executeAgentTask(input: AgentExecuteInput): Promise<AgentE
   const startedAt = Date.now();
 
   // #2042 — delegate to callAnthropicMessages so the v3 provider router
-  // (Anthropic / Ollama / OpenRouter) governs which backend is hit. The
-  // previous inline `fetch('https://api.anthropic.com/...')` bypassed
-  // the router entirely and forced an ANTHROPIC_API_KEY error for every
-  // non-Anthropic deployment. Reporter (@ummcke00) had OpenRouter
-  // configured but the bypass made the agent unreachable.
-  const result = await callAnthropicMessages({
+  // (Anthropic / Ollama / OpenRouter) governs which backend is hit.
+  let result = await callAnthropicMessages({
     model: anthropicModel,
     prompt: input.prompt,
     systemPrompt,
@@ -488,7 +528,110 @@ export async function executeAgentTask(input: AgentExecuteInput): Promise<AgentE
     timeoutMs: input.timeoutMs,
   });
 
+  // ADR-149 iter 7 — fallback chain on retryable failures (429, 5xx,
+  // timeout). When the cost-optimal neural backend picked a specific
+  // model id and that model fails for a transient reason, fall back to
+  // the next-cheapest candidate that clears the quality bar. Budget is
+  // bounded by CLAUDE_FLOW_ROUTER_FALLBACK_MAX_RETRIES (default 1) so
+  // upstream outages don't cause retry storms.
+  const fallbackBudget = Math.max(0, parseInt(process.env.CLAUDE_FLOW_ROUTER_FALLBACK_MAX_RETRIES ?? '1', 10) || 1);
+  const fallbackHistory: Array<{ modelId: string; error: string }> = [];
+  if (!result.success && agent.modelId && fallbackBudget > 0) {
+    const isRetryable = /\b(429|500|502|503|504|timeout|ECONNRESET|ETIMEDOUT)\b/i.test(result.error ?? '');
+    if (isRetryable) {
+      try {
+        const { nextCostOptimalAlternative } = await import('../ruvector/neural-router.js');
+        // ADR-149 iter 9 — delegate to the shared task-embedder LRU. The
+        // pipeline + cache are shared with agent-tools.ts, so the embedding
+        // for this prompt is almost always already cached from the initial
+        // routing decision (no extra inference cost in steady state).
+        const { embedTaskWithCache } = await import('../ruvector/task-embedder.js');
+        const embedding = await embedTaskWithCache(input.prompt);
+        if (embedding) {
+          const excludeIds: string[] = [agent.modelId];
+          for (let attempt = 0; attempt < fallbackBudget && !result.success; attempt++) {
+            fallbackHistory.push({ modelId: excludeIds[excludeIds.length - 1], error: result.error ?? '' });
+            const alt = await nextCostOptimalAlternative(embedding, excludeIds);
+            if (!alt || !alt.modelId) break;
+            excludeIds.push(alt.modelId);
+            const altResult = await callAnthropicMessages({
+              model: alt.modelId,
+              prompt: input.prompt,
+              systemPrompt,
+              maxTokens: input.maxTokens,
+              temperature: input.temperature,
+              timeoutMs: input.timeoutMs,
+            });
+            // Record the model that ACTUALLY answered (or errored). On success,
+            // update agent.modelId so downstream observers see the retry winner.
+            agent.modelId = alt.modelId;
+            result = altResult;
+          }
+        }
+      } catch {
+        // Fallback chain is best-effort — preserve the original error result.
+      }
+    }
+  }
+
   agent.status = 'idle';
+
+  // ADR-149 — close the bandit feedback loop. `recordModelOutcome` updates
+  // the Beta(α,β) prior for the agent's tier so the Thompson sampler learns
+  // from production traffic instead of staying frozen at install-day priors.
+  // This is best-effort: any error here must NOT break the agent execution.
+  // For now, "success" = the model returned a response without an API error.
+  // A finer-grained signal (user-accepted output / regression-detected) is a
+  // follow-up; this commit closes the bandit's basic learning loop.
+  try {
+    const { recordModelOutcome, recordModelOutcomeByModelId } = await import('../ruvector/model-router.js');
+    // Bandit priors are keyed on the 3 canonical tiers (haiku/sonnet/opus/inherit);
+    // collapse opus-4.7 → opus before recording so the bandit's per-tier Beta
+    // updates correctly.
+    const tier: 'haiku' | 'sonnet' | 'opus' | 'inherit' =
+      agent.model === 'opus-4.7' ? 'opus' :
+      (agent.model as 'haiku' | 'sonnet' | 'opus' | 'inherit' | undefined) ?? 'sonnet';
+    const outcome: 'success' | 'failure' = result.success ? 'success' : 'failure';
+    recordModelOutcome(input.prompt, tier, outcome);
+    // ADR-149 — also write to the shadow per-modelId priors when the cost-
+    // optimal neural backend picked a concrete model id. Selection logic
+    // still uses tier priors, but the per-modelId data accumulates so a
+    // future refactor can switch the selector over.
+    if (agent.modelId) {
+      recordModelOutcomeByModelId(input.prompt, agent.modelId, outcome);
+    }
+    // ADR-149 iter 17 — close the production-data side of the feedback loop.
+    // The trajectory recorder (CLAUDE_FLOW_ROUTER_TRAJECTORY=1) writes
+    // per-decision rows to .swarm/model-router-trajectories.jsonl from the
+    // model-router itself. Now we ALSO write outcome rows here so future
+    // training (scripts/train-from-trajectories.mjs, follow-up) can pair
+    // decision+outcome by task_hash and produce DRACO-shaped retraining
+    // rows from real production traffic. quality = 1.0 on success, 0.0 on
+    // failure (coarse signal; finer-grained quality from user ratings or
+    // regression-detection is a separate hook).
+    if (process.env.CLAUDE_FLOW_ROUTER_TRAJECTORY === '1') {
+      try {
+        const { recordTrajectoryOutcome } = await import('../ruvector/router-trajectory.js');
+        const scores: Record<string, number> | undefined = agent.modelId
+          ? { [agent.modelId]: outcome === 'success' ? 1.0 : 0.0 }
+          : undefined;
+        // iter 31 — pass token usage + modelId so the recorder can compute
+        // USD spend at write time. Consumers (`router decisions`, cost-
+        // savings reports) get cost without their own price table.
+        recordTrajectoryOutcome({
+          task: input.prompt,
+          quality: outcome === 'success' ? 1.0 : 0.0,
+          scores,
+          source: 'agent-execute',
+          tokens: result.usage ? { input: result.usage.inputTokens, output: result.usage.outputTokens } : undefined,
+          modelId: agent.modelId,
+        });
+      } catch { /* never break execution */ }
+    }
+  } catch {
+    // Silent — bandit feedback must never block routing.
+  }
+
   if (result.success) {
     const out: AgentExecuteResult = {
       success: true,
@@ -499,6 +642,7 @@ export async function executeAgentTask(input: AgentExecuteInput): Promise<AgentE
       output: result.output,
       usage: result.usage,
       durationMs: result.durationMs ?? Date.now() - startedAt,
+      ...(fallbackHistory.length > 0 ? { fallbackHistory } : {}),
     };
     agent.lastResult = out as unknown as Record<string, unknown>;
     saveAgentStore(store);
@@ -515,6 +659,7 @@ export async function executeAgentTask(input: AgentExecuteInput): Promise<AgentE
     model: anthropicModel,
     error: result.error || 'agent_execute failed',
     durationMs: result.durationMs ?? Date.now() - startedAt,
+    ...(fallbackHistory.length > 0 ? { fallbackHistory } : {}),
     ...(noProvider && {
       remediation:
         'Set one of ANTHROPIC_API_KEY, OPENROUTER_API_KEY (+ optional OPENROUTER_BASE_URL), or OLLAMA_API_KEY. ' +

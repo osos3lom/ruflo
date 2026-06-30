@@ -58,7 +58,13 @@ const initResult = spawnSync(
     cwd: tmpDir,
     env: { ...process.env, CI: 'true', FORCE_COLOR: '0' },
     encoding: 'utf8',
-    timeout: 60_000,
+    // iter 131 — bumped from 180s to 300s (5 min). macos-latest in this
+    // matrix observed `init` running exactly 180s before the timer fired
+    // (CI cold ONNX download + agentic-flow init + MCP server spawn).
+    // The CI job's timeout-minutes is 10, so 300s leaves room for the
+    // smoke's assertion phase to also run. The default GH timeout-minutes
+    // is 360s; we're now well under that on all platforms.
+    timeout: 300_000,
   }
 );
 

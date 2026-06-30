@@ -1,6 +1,7 @@
 ---
 name: aidefence
 description: AIDefence status, detection stats, and threat analysis dashboard
+allowed-tools: mcp__claude-flow__aidefence_stats
 ---
 
 Show the AIDefence dashboard:

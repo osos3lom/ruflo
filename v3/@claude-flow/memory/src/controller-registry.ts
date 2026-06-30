@@ -274,6 +274,9 @@ export class ControllerRegistry extends EventEmitter {
             ? result.reason.message
             : String(result.reason);
 
+          // #2432 — close any prior instance before replacing.
+          await this.closePriorIfAny(name);
+
           this.controllers.set(name, {
             name,
             instance: null,
@@ -619,10 +622,44 @@ export class ControllerRegistry extends EventEmitter {
   }
 
   /**
+   * Close any prior controller instance for `name` before it is replaced.
+   *
+   * #2432 fix — pre-fix, `controllers.set(name, ...)` silently orphaned the
+   * prior instance. For backends that allocate native / WASM resources
+   * (notably `SqlJsRvfBackend` which keeps an Emscripten MEMFS file ~11 MB
+   * per `new SQL.Database(buffer)` until `close()` runs), GC'ing the JS
+   * wrapper does NOT reclaim the underlying allocation. A long-running
+   * `mcp start` process that re-init'd controllers hundreds of times grew
+   * external memory by ~36 GB in production over 6 weeks.
+   *
+   * Best-effort close: catch and ignore errors — replacement must proceed
+   * even if the prior instance's close throws (it's already orphaned at
+   * this point either way).
+   */
+  private async closePriorIfAny(name: ControllerName): Promise<void> {
+    const prior = this.controllers.get(name);
+    if (!prior?.instance) return;
+    const inst = prior.instance as { close?: () => unknown; dispose?: () => unknown };
+    try {
+      if (typeof inst.close === 'function') {
+        await inst.close();
+      } else if (typeof inst.dispose === 'function') {
+        await inst.dispose();
+      }
+    } catch {
+      // Best-effort — leak is preferable to crashing init on a replacement.
+    }
+  }
+
+  /**
    * Initialize a single controller with error isolation.
    */
   private async initController(name: ControllerName, level: number): Promise<void> {
     const startTime = performance.now();
+
+    // #2432 — close any prior instance before replacing the map entry,
+    // otherwise its native/WASM resources leak (e.g. sql.js MEMFS files).
+    await this.closePriorIfAny(name);
 
     try {
       const instance = await this.createController(name);

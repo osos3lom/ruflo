@@ -92,32 +92,126 @@ const startCommand: Command = {
     }
 
     // Check if background daemon already running (skip if we ARE the daemon process)
+    //
+    // #2407 — without an atomic lockfile, N concurrent `daemon start` calls
+    // (devcontainer setup + VS Code task + MCP hook within ~500 ms) all see
+    // an empty PID file in the same instant, all proceed past this dedup,
+    // and all fork their own background daemon. One incident accumulated
+    // 39 zombie daemons holding ~8.5 GiB → kernel panic.
+    //
+    // Wrap the check + the subsequent fork in an O_EXCL lockfile so the
+    // dedup is process-atomic. Lock holder gets to spawn; competing callers
+    // see EEXIST, wait briefly, then re-read the PID file (which the holder
+    // has now written), and return "already running" cleanly.
+    // #2484 — previously the lockfile was released BEFORE startBackgroundDaemon
+    // ran, opening a race window where a concurrent caller could see no lock
+    // AND no PID file (PID hadn't been written yet) and proceed to fork ITS
+    // OWN background daemon. EDortta reported 4 identical daemons per Claude
+    // Code session on v3.10.37 under exactly this pattern (MCP startup
+    // racing with a sibling invocation).
+    //
+    // Fix: hold the lock across the entire spawn lifecycle (dedup check →
+    // killStaleDaemons → fork → PID file write), so the lock-loser ALWAYS
+    // sees either a live lock or a populated PID file, never the empty
+    // window in between.
+    let lockFd: number | null = null;
+    let lockFile = '';
     if (!isDaemonProcess) {
-      const bgPid = getBackgroundDaemonPid(projectRoot);
-      if (bgPid && isProcessRunning(bgPid)) {
-        if (!quiet) {
-          output.printWarning(`Daemon already running in background (PID: ${bgPid}). Stop it first with: daemon stop`);
+      const stateDir = join(resolve(projectRoot), '.claude-flow');
+      lockFile = join(stateDir, 'daemon.lock');
+      try { fs.mkdirSync(stateDir, { recursive: true }); } catch { /* exists */ }
+      try {
+        lockFd = fs.openSync(lockFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
+        fs.writeSync(lockFd, String(process.pid));
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
+          // Another `daemon start` is mid-spawn. Wait up to 5s for it to
+          // finish, then re-check the PID file. If the holder crashed
+          // mid-spawn, fall through and reset; killStaleDaemons + a fresh
+          // attempt will recover.
+          const deadline = Date.now() + 5000;
+          while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 100));
+            const winnerPid = getBackgroundDaemonPid(projectRoot);
+            if (winnerPid && isProcessRunning(winnerPid)) {
+              if (!quiet) {
+                output.printWarning(`Daemon already running in background (PID: ${winnerPid}). Stop it first with: daemon stop`);
+              }
+              return { success: true };
+            }
+          }
+          // Stale lockfile from a crashed prior attempt — clear it and
+          // proceed without a held lock. Worst case we double-spawn ONCE
+          // and the killStaleDaemons sweep below cleans up.
+          try { fs.unlinkSync(lockFile); } catch { /* ignore */ }
+        } else {
+          throw e;
         }
-        return { success: true };
       }
-      // #1551: Kill any stale daemon processes that weren't tracked by PID file
-      await killStaleDaemons(projectRoot, quiet);
+      // Dedup check while holding the lock.
+      try {
+        const bgPid = getBackgroundDaemonPid(projectRoot);
+        if (bgPid && isProcessRunning(bgPid)) {
+          if (!quiet) {
+            output.printWarning(`Daemon already running in background (PID: ${bgPid}). Stop it first with: daemon stop`);
+          }
+          // Release the lock on the early-return path.
+          if (lockFd !== null) {
+            try { fs.closeSync(lockFd); } catch { /* ignore */ }
+            try { fs.unlinkSync(lockFile); } catch { /* ignore */ }
+          }
+          return { success: true };
+        }
+        // #1551: Kill any stale daemon processes that weren't tracked by PID file
+        await killStaleDaemons(projectRoot, quiet);
+      } catch (e) {
+        // Anything that throws here MUST still release the lock before
+        // rethrowing so we don't leave the lockfile behind for future
+        // invocations to wait on for 5s before recovering.
+        if (lockFd !== null) {
+          try { fs.closeSync(lockFd); } catch { /* ignore */ }
+          try { fs.unlinkSync(lockFile); } catch { /* ignore */ }
+          lockFd = null;
+        }
+        throw e;
+      }
     }
 
-    // Background mode (default): fork a detached process.
+    // Background mode (default): fork a detached process. The lock (if held)
+    // is released AFTER startBackgroundDaemon's PID file write completes —
+    // see the cleanup inside startBackgroundDaemon's caller path below.
     // #1968: previously only forwarded resource thresholds — `--workers`,
     // `--headless`, and `--sandbox` were dropped on the floor when the
     // launcher forked the foreground child, so `daemon start --workers map`
     // got the full default worker set instead.
     if (!foreground) {
-      return startBackgroundDaemon(projectRoot, quiet, {
-        maxCpuLoad: rawMaxCpu,
-        minFreeMemory: rawMinMem,
-        workers: ctx.flags.workers as string | undefined,
-        headless: ctx.flags.headless as boolean | undefined,
-        sandbox: ctx.flags.sandbox as string | undefined,
-        ttl: rawTtl,
-      });
+      try {
+        return await startBackgroundDaemon(projectRoot, quiet, {
+          maxCpuLoad: rawMaxCpu,
+          minFreeMemory: rawMinMem,
+          workers: ctx.flags.workers as string | undefined,
+          headless: ctx.flags.headless as boolean | undefined,
+          sandbox: ctx.flags.sandbox as string | undefined,
+          ttl: rawTtl,
+        });
+      } finally {
+        // Release the lock NOW — startBackgroundDaemon has either written
+        // the PID file (success path) or thrown (in which case the next
+        // caller's killStaleDaemons sweep handles the orphan).
+        if (lockFd !== null) {
+          try { fs.closeSync(lockFd); } catch { /* ignore */ }
+          try { fs.unlinkSync(lockFile); } catch { /* ignore */ }
+        }
+      }
+    }
+
+    // Foreground path: release the lock before we start the (potentially
+    // long-running) foreground daemon so other callers can dedup against
+    // our PID file (foreground writes its own PID).
+    if (lockFd !== null) {
+      try { fs.closeSync(lockFd); } catch { /* ignore */ }
+      try { fs.unlinkSync(lockFile); } catch { /* ignore */ }
+      lockFd = null;
     }
 
     // Foreground mode: run in current process (blocks terminal)

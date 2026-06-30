@@ -2723,7 +2723,8 @@ const workerDispatchCommand: Command = {
 
     if (!trigger) {
       output.printError('--trigger is required');
-      output.writeln('Available triggers: ultralearn, optimize, consolidate, predict, audit, map, preload, deepdive, document, refactor, benchmark, testgaps');
+      output.writeln('Available triggers: ultralearn, optimize, consolidate, predict, audit, map, preload, deepdive, document, refactor, benchmark, testgaps, oia-audit');
+      output.writeln(output.dim('Tip: `oia-audit` (ADR-150) also runs as `ruflo metaharness oia-audit` for direct invocation.'));
       return { success: false, exitCode: 1 };
     }
 

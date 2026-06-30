@@ -1733,24 +1733,42 @@ export async function loadEmbeddingModel(options?: {
     }
 
     if (pipelineFn && transformersSource) {
-      if (verbose) {
-        console.log(`Loading ONNX embedding model via ${transformersSource} (all-MiniLM-L6-v2)...`);
+      // #2461: pipelineFn() can throw with `fetch failed` on Windows behind
+      // a corporate proxy / strict firewall when transformers tries to pull
+      // the model files from the HuggingFace CDN. Without the catch, that
+      // throw escapes the outer try and aborts loadEmbeddingModel() with
+      // success=false BEFORE we reach the (working) ruvector ONNX fallback
+      // below — leaving embeddingModelState=null, which then crashes
+      // generateLocalEmbedding() with "Cannot read properties of null
+      // (reading 'model')" on every memory store / search call.
+      try {
+        if (verbose) {
+          console.log(`Loading ONNX embedding model via ${transformersSource} (all-MiniLM-L6-v2)...`);
+        }
+        const embedder = await pipelineFn('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+
+        embeddingModelState = {
+          loaded: true,
+          model: embedder,
+          tokenizer: null,
+          dimensions: 384 // MiniLM-L6 produces 384-dim vectors
+        };
+
+        return {
+          success: true,
+          dimensions: 384,
+          modelName: 'Xenova/all-MiniLM-L6-v2',
+          loadTime: Date.now() - startTime
+        };
+      } catch (err) {
+        if (verbose) {
+          console.warn(
+            `${transformersSource} pipeline init failed (${err instanceof Error ? err.message : String(err)}); ` +
+            'falling through to ruvector ONNX / agentic-flow / hash fallback.'
+          );
+        }
+        // Intentional fall-through to the next embedder branch.
       }
-      const embedder = await pipelineFn('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-
-      embeddingModelState = {
-        loaded: true,
-        model: embedder,
-        tokenizer: null,
-        dimensions: 384 // MiniLM-L6 produces 384-dim vectors
-      };
-
-      return {
-        success: true,
-        dimensions: 384,
-        modelName: 'Xenova/all-MiniLM-L6-v2',
-        loadTime: Date.now() - startTime
-      };
     }
 
     // Fallback: Check for agentic-flow ReasoningBank embeddings (v3)
@@ -1923,7 +1941,18 @@ export async function generateLocalEmbedding(text: string): Promise<{
     await loadEmbeddingModel();
   }
 
-  const state = embeddingModelState!;
+  // #2461: loadEmbeddingModel() can leave embeddingModelState null when an
+  // earlier loader (transformers fetch, ruvector init) throws and we never
+  // reach the hash-fallback assignment. Don't lie with a `!` non-null
+  // assertion — fall back to a synthetic hash-fallback state so we degrade
+  // to the deterministic 128-dim hash embedding instead of crashing the
+  // entire memory store/search path with "reading property 'model' of null".
+  const state = embeddingModelState ?? {
+    loaded: true,
+    model: null,
+    tokenizer: null,
+    dimensions: 128,
+  };
 
   // Use ONNX model if available
   if (state.model && typeof (state.model as any) === 'function') {

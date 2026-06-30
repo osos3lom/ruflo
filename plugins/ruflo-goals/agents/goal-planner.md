@@ -85,5 +85,5 @@ Use MCP tools for persistence and learning:
 
 After completing a plan, feed the planner trajectory store so future replans inherit the outcome:
 ```bash
-npx @claude-flow/cli@latest hooks post-task --task-id "TASK_ID" --success true --train-neural true
+npx @claude-flow/cli@latest hooks post-task --task-id "TASK_ID" --success true --store-results true
 ```

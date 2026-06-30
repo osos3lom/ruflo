@@ -33,9 +33,15 @@ interface AgentRecord {
   config: Record<string, unknown>;
   createdAt: string;
   domain?: string;
-  model?: ClaudeModel;  // Model assigned to this agent
-  modelRoutedBy?: 'explicit' | 'router' | 'codemod' | 'default';  // How model was determined (ADR-026, ADR-143)
-  lastResult?: Record<string, unknown>;  // Output from last completed task
+  model?: ClaudeModel;  // Tier label assigned to this agent
+  modelRoutedBy?: 'explicit' | 'router' | 'codemod' | 'default' | 'hybrid';  // ADR-026/143/149
+  /** ADR-149 — concrete picked model id (e.g. inclusionai/ling-2.6-flash). */
+  modelId?: string;
+  /** ADR-148 — execution provider hint. */
+  provider?: 'anthropic' | 'openrouter';
+  /** ADR-148 — concrete OpenRouter slug when provider='openrouter'. */
+  openrouterModel?: string;
+  lastResult?: Record<string, unknown>;
 }
 
 interface AgentStore {
@@ -140,6 +146,16 @@ async function getModelRouter() {
   return modelRouterInstance;
 }
 
+// ADR-149 — the cost-optimal neural router fires only when
+// `routeToModelFull(task, embedding)` is called with a real embedding. We
+// delegate to the shared task-embedder module (ADR-149 iter 9) so the
+// @xenova/transformers MiniLM pipeline + LRU cache are shared across
+// agent-tools and the agent-execute-core fallback path.
+async function embedTaskSafe(task: string): Promise<number[] | undefined> {
+  const { embedTaskWithCache } = await import('../ruvector/task-embedder.js');
+  return embedTaskWithCache(task);
+}
+
 /**
  * Determine model for agent based on (ADR-026 3-tier routing):
  * 1. Explicit model in config
@@ -153,10 +169,16 @@ async function determineAgentModel(
   task?: string
 ): Promise<{
   model: ClaudeModel;
-  routedBy: 'explicit' | 'router' | 'codemod' | 'default';
+  routedBy: 'explicit' | 'router' | 'codemod' | 'default' | 'hybrid';
   canSkipLLM?: boolean;
   codemodIntent?: string;
   tier?: 1 | 2 | 3;
+  /** ADR-149 — concrete picked model id when the neural backend fired. */
+  modelId?: string;
+  /** ADR-148 — execution provider hint. */
+  provider?: 'anthropic' | 'openrouter';
+  /** ADR-148 — concrete OpenRouter slug when provider='openrouter'. */
+  openrouterModel?: string;
 }> {
   // 1. Explicit model in config
   if (config.model && ['haiku', 'sonnet', 'opus', 'opus-4.7', 'inherit'].includes(config.model as string)) {
@@ -169,7 +191,12 @@ async function determineAgentModel(
       // Try enhanced router first (includes codemod-intent detection)
       const { getEnhancedModelRouter } = await import('../ruvector/enhanced-model-router.js');
       const enhancedRouter = getEnhancedModelRouter();
-      const routeResult = await enhancedRouter.route(task, { filePath: config.filePath as string });
+      // ADR-149 — embed the task so the cost-optimal neural backend fires.
+      // We probe the embedder lazily; if it can't load (no @xenova/transformers
+      // available), the enhanced router falls back to heuristic+bandit and
+      // the existing behaviour is preserved.
+      const embedding = await embedTaskSafe(task);
+      const routeResult = await enhancedRouter.route(task, { filePath: config.filePath as string, embedding });
 
       if (routeResult.tier === 1 && routeResult.canSkipLLM) {
         // Deterministic codemod can apply this edit ($0, no LLM)
@@ -182,18 +209,44 @@ async function determineAgentModel(
         };
       }
 
+      // ADR-149 — forward the per-model fields. When the neural backend
+      // fired, modelId carries the cost-optimal pick (e.g. Ling); when
+      // it didn't, these are undefined and downstream behaviour is unchanged.
+      const routedBy: 'router' | 'hybrid' =
+        routeResult.routedBy === 'hybrid' ? 'hybrid' : 'router';
       return {
         model: routeResult.model!,
-        routedBy: 'router',
+        routedBy,
         tier: routeResult.tier,
+        modelId: routeResult.modelId,
+        provider: routeResult.provider,
+        openrouterModel: routeResult.openrouterModel,
       };
     } catch {
       // Enhanced router not available, try basic router
       const router = await getModelRouter();
       if (router) {
         try {
-          const result = await router.route(task);
-          return { model: result.model, routedBy: 'router' };
+          // ADR-149 — embed the task so the cost-optimal neural backend
+          // fires (it's gated on `embedding && embedding.length > 0`).
+          // Without the embedding, route() falls back to heuristic+bandit
+          // and every per-model Pareto win the v2 measurement landed is
+          // invisible. embedTaskSafe returns undefined on any failure;
+          // route(task, undefined) behaves exactly as the prior code.
+          const embedding = await embedTaskSafe(task);
+          const result = await router.route(task, embedding);
+          // Map the routing mechanism to the broader agent-record taxonomy.
+          // 'hybrid' = neural prior + bandit blended (ADR-149); fold the rest
+          // into 'router' for back-compat with consumers reading modelRoutedBy.
+          const routedBy: 'router' | 'hybrid' =
+            result.routedBy === 'hybrid' ? 'hybrid' : 'router';
+          return {
+            model: result.model,
+            routedBy,
+            modelId: result.modelId,
+            provider: result.provider,
+            openrouterModel: result.openrouterModel,
+          };
         } catch {
           // Fall through to defaults on router error
         }
@@ -274,6 +327,9 @@ export const agentTools: MCPTool[] = [
         domain: input.domain as string,
         model: routingResult.model,
         modelRoutedBy: routingResult.routedBy,
+        ...(routingResult.modelId ? { modelId: routingResult.modelId } : {}),
+        ...(routingResult.provider ? { provider: routingResult.provider } : {}),
+        ...(routingResult.openrouterModel ? { openrouterModel: routingResult.openrouterModel } : {}),
       };
 
       store.agents[agentId] = agent;
@@ -321,6 +377,9 @@ export const agentTools: MCPTool[] = [
         agentType: agent.agentType,
         model: agent.model,
         modelRoutedBy: routingResult.routedBy,
+        ...(routingResult.modelId ? { modelId: routingResult.modelId } : {}),
+        ...(routingResult.provider ? { provider: routingResult.provider } : {}),
+        ...(routingResult.openrouterModel ? { openrouterModel: routingResult.openrouterModel } : {}),
         status: 'registered',
         createdAt: agent.createdAt,
         note: 'Agent registered for coordination. Three execution paths: ' +

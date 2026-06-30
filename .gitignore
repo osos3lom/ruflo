@@ -65,6 +65,11 @@
 .hive-mind/hive.db*
 .idea/
 .mcp.json
+# Plugin-shipped .mcp.json templates are part of the plugin contract (smoke
+# step "registers a 'ruflo' MCP server" asserts they're committed). Exempt
+# them from the repo-level .mcp.json ignore. User-specific .mcp.json at
+# the repo root or other paths stays ignored.
+!plugins/*/.mcp.json
 .nyc_output/
 .pnpm-debug.log*
 .pnpm-store/
@@ -126,6 +131,7 @@ yarn-error.log*
 # Claude Flow generated files
 .claude/settings.local.json
 .mcp.json
+!plugins/*/.mcp.json
 claude-flow.config.json
 .swarm/
 .hive-mind/

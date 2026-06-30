@@ -49,7 +49,7 @@ The pathfinder traversal algorithm finds relevant subgraphs:
 - `mcp__claude-flow__agentdb_causal-edge` -- create/query causal edges between entities
 - `mcp__claude-flow__agentdb_hierarchical-store` -- store entity metadata in hierarchical structure
 - `mcp__claude-flow__agentdb_hierarchical-recall` -- recall entities by path or query
-- `mcp__claude-flow__agentdb_semantic-route` -- semantic similarity routing for graph search
+- `mcp__claude-flow__agentdb_semantic-route` -- semantic similarity routing for graph search (note: `semanticRouter` controller is `enabled: false` in current AgentDB builds — fall back to `agentdb_pattern-search` or `embeddings_generate` + manual cosine; see ruvnet/ruflo#2049)
 - `mcp__claude-flow__agentdb_pattern-store` -- store discovered graph patterns
 - `mcp__claude-flow__agentdb_pattern-search` -- search for similar graph structures
 - `mcp__claude-flow__agentdb_context-synthesize` -- synthesize context from multiple graph nodes

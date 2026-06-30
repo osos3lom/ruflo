@@ -3260,6 +3260,197 @@ export const hooksIntelligenceStats: MCPTool = {
       ruvllmStats.graphDatabase = { backend: gs.backend, totalNodes: gs.totalNodes, totalEdges: gs.totalEdges, avgDegree: gs.avgDegree };
     } catch { /* not available */ }
 
+    // ADR-148 — model-router operational counters (per-mechanism, per-backend,
+    // A/B disagreement rate). Process-local so this is the most accurate
+    // surface; the memory-store path was aggregates-only and lossy.
+    let routerStats: ReturnType<typeof import('../ruvector/model-router.js').getModelRouterStats> | null = null;
+    let neuralRouter: { enabled: boolean; available: boolean; routedBy: string | null; reason: string } | null = null;
+    try {
+      const { getModelRouterStats } = await import('../ruvector/model-router.js');
+      routerStats = getModelRouterStats();
+    } catch { /* router module not loaded */ }
+    try {
+      const { neuralRouterStatus } = await import('../ruvector/neural-router.js');
+      const s = await neuralRouterStatus();
+      neuralRouter = { enabled: s.enabled, available: s.available, routedBy: s.routedBy, reason: s.reason };
+    } catch { /* neural-router module not loaded */ }
+
+    // ADR-149 iter 42 — surface cost-savings to MCP consumers. Iter 31-34
+    // shipped the CLI. This computes the headline numbers (last 7d actual
+    // vs heuristic counterfactual) from the trajectory JSONL so Claude Code
+    // sessions can ask "is the router saving money?" without shelling out
+    // to bash. Best-effort: returns null when trajectory missing/empty.
+    let costSavings: {
+      windowDays: number;
+      pairs: number;
+      actualUsd: number;
+      counterfactualUsd: number;
+      savingsUsd: number;
+      savingsPct: number;
+    } | null = null;
+    try {
+      const fs = await import('node:fs');
+      const pathMod = await import('node:path');
+      const trajectoryPath = process.env.CLAUDE_FLOW_ROUTER_TRAJECTORY_PATH
+        ?? pathMod.resolve(process.cwd(), '.swarm', 'model-router-trajectories.jsonl');
+      if (fs.existsSync(trajectoryPath)) {
+        const { MODEL_PRICES } = await import('../ruvector/model-prices.js');
+        const windowMs = 7 * 86_400_000;          // 7-day window — matches iter 41 default
+        const cutoffMs = Date.now() - windowMs;
+        interface DecisionLite { ts: string; task_hash: string; complexity: number; ab_pair?: { bandit_pick: string } }
+        interface OutcomeLite { ts: string; task_hash: string; cost_usd?: number; tokens?: { input: number; output: number } }
+        // iter 63 — port iter 62's fix from CLI to MCP. Outcomes track ALL
+        // occurrences (Array) instead of deduping by task_hash, so repeat
+        // tasks contribute their full cumulative cost.
+        const decisions = new Map<string, DecisionLite>();
+        const outcomes: OutcomeLite[] = [];
+        for (const l of fs.readFileSync(trajectoryPath, 'utf8').split('\n')) {
+          if (!l.trim()) continue;
+          try {
+            const r = JSON.parse(l);
+            if (Date.parse(r.ts) < cutoffMs) continue;
+            if (r.type === 'decision') decisions.set(r.task_hash, r);
+            else if (r.type === 'outcome') outcomes.push(r);
+          } catch { /* malformed */ }
+        }
+        let pairs = 0, actual = 0, cf = 0;
+        for (const out of outcomes) {
+          if (!out?.cost_usd || !out.tokens) continue;
+          const dec = decisions.get(out.task_hash);
+          if (!dec) continue;
+          pairs++;
+          actual += out.cost_usd;
+          // Same heuristic counterfactual as iter 32 default.
+          const tierModel = dec.complexity < 0.34 ? 'haiku'
+            : dec.complexity < 0.67 ? 'sonnet' : 'opus';
+          const cfModel = dec.ab_pair?.bandit_pick ?? tierModel;
+          const p = MODEL_PRICES[cfModel] ?? { in: 1, out: 1 };
+          cf += (out.tokens.input * p.in + out.tokens.output * p.out) / 1_000_000;
+        }
+        if (pairs > 0) {
+          const savings = cf - actual;
+          costSavings = {
+            windowDays: 7,
+            pairs,
+            actualUsd: Math.round(actual * 1_000_000) / 1_000_000,
+            counterfactualUsd: Math.round(cf * 1_000_000) / 1_000_000,
+            savingsUsd: Math.round(savings * 1_000_000) / 1_000_000,
+            savingsPct: cf > 0 ? Math.round((savings / cf) * 10000) / 100 : 0,
+          };
+        }
+      }
+    } catch { /* trajectory parse failed — leave costSavings null */ }
+
+    // ADR-149 iter 56 — recent activity + warmest bandit cell. Mirrors what
+    // iter 49's CLI `stats-summary` shows so MCP consumers don't have to
+    // glue together multiple tool calls. Single inline pass over the JSONL
+    // (24h window only) + read of model-router-state.json.
+    let recent24h: {
+      decisions: number;
+      fallbacks: number;
+      fallbackRatePct: number;
+    } | null = null;
+    let warmestBanditCell: {
+      bucket: string;
+      key: string;
+      samples: number;
+      meanQuality: number;
+    } | null = null;
+    try {
+      const fs = await import('node:fs');
+      const pathMod = await import('node:path');
+      const trajectoryPath = process.env.CLAUDE_FLOW_ROUTER_TRAJECTORY_PATH
+        ?? pathMod.resolve(process.cwd(), '.swarm', 'model-router-trajectories.jsonl');
+      if (fs.existsSync(trajectoryPath)) {
+        const cutoffMs = Date.now() - 24 * 3600_000;
+        let dec = 0, fallback = 0;
+        for (const l of fs.readFileSync(trajectoryPath, 'utf8').split('\n')) {
+          if (!l.trim()) continue;
+          try {
+            const r = JSON.parse(l);
+            if (r.type !== 'decision') continue;
+            if (Date.parse(r.ts) < cutoffMs) continue;
+            dec++;
+            if (r.routed_by === 'bandit-fallback') fallback++;
+          } catch { /* */ }
+        }
+        if (dec > 0) {
+          recent24h = {
+            decisions: dec,
+            fallbacks: fallback,
+            fallbackRatePct: Math.round((fallback / dec) * 10000) / 100,
+          };
+        }
+      }
+
+      // Warmest bandit cell from persisted state.
+      const statePath = pathMod.resolve(process.cwd(), '.swarm', 'model-router-state.json');
+      if (fs.existsSync(statePath)) {
+        const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+        const priors = state.priorsById ?? state.priors ?? {};
+        let bestSamples = 0;
+        for (const bucket of ['low', 'med', 'high']) {
+          const b = priors[bucket];
+          if (!b) continue;
+          for (const [k, p] of Object.entries(b as Record<string, { alpha: number; beta: number }>)) {
+            const samples = p.alpha + p.beta - 2;
+            if (samples > bestSamples) {
+              bestSamples = samples;
+              warmestBanditCell = { bucket, key: k, samples, meanQuality: p.alpha / (p.alpha + p.beta) };
+            }
+          }
+        }
+      }
+    } catch { /* best-effort */ }
+
+    // ADR-149 iter 51 — surface forward projection to MCP, mirroring iter 41
+    // (CLI cost-projection) but as an additive field. Linear extrapolation
+    // from the same 7d measurement window the costSavings block used. JSON
+    // shape lets Claude Code sessions answer "what will routing cost over
+    // the next 30 days?" in-conversation.
+    let costProjection: {
+      windowDays: number;
+      callsPerDay: number;
+      avgActualPerCall: number;
+      avgCounterfactualPerCall: number;
+      horizons: Record<string, {
+        projectedCalls: number;
+        projectedActualUsd: number;
+        projectedCounterfactualUsd: number;
+        projectedSavingsUsd: number;
+        projectedSavingsPct: number;
+      }>;
+    } | null = null;
+    if (costSavings && costSavings.pairs > 0) {
+      const windowSeconds = 7 * 86400;
+      const callsPerSecond = costSavings.pairs / windowSeconds;
+      const callsPerDay = callsPerSecond * 86400;
+      const avgActualPerCall = costSavings.actualUsd / costSavings.pairs;
+      const avgCfPerCall = costSavings.counterfactualUsd / costSavings.pairs;
+      const horizonDays = { '30d': 30, '90d': 90, '365d': 365 };
+      const horizons: Record<string, { projectedCalls: number; projectedActualUsd: number; projectedCounterfactualUsd: number; projectedSavingsUsd: number; projectedSavingsPct: number }> = {};
+      for (const [label, days] of Object.entries(horizonDays)) {
+        const projectedCalls = Math.round(callsPerDay * days);
+        const projActual = avgActualPerCall * projectedCalls;
+        const projCf = avgCfPerCall * projectedCalls;
+        const projSavings = projCf - projActual;
+        horizons[label] = {
+          projectedCalls,
+          projectedActualUsd: Math.round(projActual * 1_000_000) / 1_000_000,
+          projectedCounterfactualUsd: Math.round(projCf * 1_000_000) / 1_000_000,
+          projectedSavingsUsd: Math.round(projSavings * 1_000_000) / 1_000_000,
+          projectedSavingsPct: projCf > 0 ? Math.round((projSavings / projCf) * 10000) / 100 : 0,
+        };
+      }
+      costProjection = {
+        windowDays: 7,
+        callsPerDay: Math.round(callsPerDay * 100) / 100,
+        avgActualPerCall: Math.round(avgActualPerCall * 1_000_000) / 1_000_000,
+        avgCounterfactualPerCall: Math.round(avgCfPerCall * 1_000_000) / 1_000_000,
+        horizons,
+      };
+    }
+
     const stats = {
       sona: sonaStats,
       moe: moeStats,
@@ -3275,6 +3466,29 @@ export const hooksIntelligenceStats: MCPTool = {
           : 0.78,
         memoryUsageMb: Math.round(memoryStats.memory.memorySizeBytes / 1024 / 1024 * 100) / 100,
       },
+      // ADR-148 — model-routing surface
+      modelRouter: routerStats ? {
+        totalDecisions: routerStats.totalDecisions,
+        modelDistribution: routerStats.modelDistribution,
+        routedByCounts: routerStats.routedByCounts,
+        neuralBackendCounts: routerStats.neuralBackendCounts,
+        ab: routerStats.ab,
+        avgComplexity: routerStats.avgComplexity,
+        avgConfidence: routerStats.avgConfidence,
+      } : null,
+      neuralRouter,
+      // ADR-149 iter 42 — cost-savings surface for MCP consumers (matches
+      // `claude-flow neural router cost-savings --since 7d` shape).
+      costSavings,
+      // ADR-149 iter 51 — forward budget projection (matches `cost-projection`
+      // CLI shape). Pairs with costSavings: one says how much we saved, the
+      // other extrapolates that savings forward to operational horizons.
+      costProjection,
+      // ADR-149 iter 56 — recent activity + warmest bandit cell to complete
+      // feature parity with the CLI `stats-summary` (iter 49). One MCP tool
+      // call now returns everything needed for an in-conversation dashboard.
+      recent24h,
+      warmestBanditCell,
       dataSource: sona ? 'real-implementations' : 'memory-fallback',
       lastUpdated: new Date().toISOString(),
     };

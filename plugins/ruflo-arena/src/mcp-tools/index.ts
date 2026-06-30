@@ -219,7 +219,8 @@ export function createArenaTools(store: RunStore): MCPTool[] {
     },
     {
       name: 'run/get',
-      description: 'Fetch a persisted run record by runId.',
+      description:
+        'Fetch a persisted run record by runId. Use when reproducing or inspecting a prior arena/tournament/evolve/coevolve run after seeing its runId in a tool result or via run/list.',
       category: 'arena',
       inputSchema: { type: 'object', properties: { runId: str('Run identifier') }, required: ['runId'] },
       handler: async (input) => {
@@ -234,7 +235,8 @@ export function createArenaTools(store: RunStore): MCPTool[] {
     },
     {
       name: 'run/list',
-      description: 'List recent persisted run records (most recent first).',
+      description:
+        'List recent persisted run records (most recent first). Use when browsing prior runs to find a runId to replay, compare strategies across runs, or audit what arena experiments have been executed in this project.',
       category: 'arena',
       inputSchema: { type: 'object', properties: { limit: num('Max records', 20) } },
       handler: async (input) => {

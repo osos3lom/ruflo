@@ -78,7 +78,7 @@ Raw cookies and tokens never enter AgentDB unwrapped — see ADR §3.
 
 ## MCP surface
 
-23 existing `mcp__claude-flow__browser_*` tools (interaction primitive) **+ 5 new `browser_session_*` lifecycle tools (implemented in v0.2.0)**:
+18 existing `mcp__claude-flow__browser_*` interaction primitives (in [`browser-tools.ts`](../../v3/@claude-flow/cli/src/mcp-tools/browser-tools.ts): open/close/click/type/fill/select/check/uncheck/hover/press/scroll/screenshot/snapshot/eval/wait/reload/back/forward) **+ 5 new `browser_session_*` lifecycle tools (implemented in v0.2.0)** for a total of 23:
 
 | Tool | Purpose |
 |------|---------|

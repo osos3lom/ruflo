@@ -83,7 +83,9 @@ const storeCommand: Command = {
   action: async (ctx: CommandContext): Promise<CommandResult> => {
     const key = ctx.flags.key as string;
     let value = ctx.flags.value as string || ctx.args[0];
-    const namespace = ctx.flags.namespace as string;
+    // #2461: without `|| 'default'`, omitting -n stores under the literal
+    // string namespace "undefined" — silent data loss for first-time users.
+    const namespace = (ctx.flags.namespace as string) || 'default';
     const ttl = ctx.flags.ttl as number;
     const tags = ctx.flags.tags ? (ctx.flags.tags as string).split(',') : [];
     const asVector = ctx.flags.vector as boolean;
@@ -208,7 +210,9 @@ const retrieveCommand: Command = {
   ],
   action: async (ctx: CommandContext): Promise<CommandResult> => {
     const key = ctx.flags.key as string || ctx.args[0];
-    const namespace = ctx.flags.namespace as string;
+    // #2461: mirror the store-side default so `memory retrieve -k k` (no -n)
+    // looks under "default" rather than the literal namespace "undefined".
+    const namespace = (ctx.flags.namespace as string) || 'default';
 
     if (!key) {
       output.printError('Key is required');

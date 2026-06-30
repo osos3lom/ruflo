@@ -2,15 +2,30 @@
  * Graph Edge Writer — ADR-130 Phase 1
  *
  * Provides a minimal interface for inserting rows into the graph_edges
- * sql.js table defined by MEMORY_SCHEMA_V3.
+ * SQLite table defined by MEMORY_SCHEMA_V3.
  *
- * This module is intentionally thin: it opens the shared sql.js SQLite db
- * (the same file used by memory-initializer storeEntry), ensures the
- * graph_edges table exists, and returns a better-sqlite3-compatible
- * prepared-statement interface.
+ * #2431 fix (2026-06-22) — replaces the prior sql.js implementation. The
+ * prior version opened sql.js, performed in-memory updates, then called
+ * `fs.writeFileSync(dbPath, db.export())` after every edge insert. This
+ * whole-file flush overwrote the main `memory.db` while the better-sqlite3
+ * bridge was actively writing through its WAL — exactly the dual-write
+ * race that ADR-068 (#1257) removed. Symptom: PRAGMA integrity_check
+ * reports `database disk image is malformed (11)` after a single
+ * memory_store + causal-edge sequence.
  *
- * The module is designed for fire-and-forget callers — every public function
- * suppresses errors internally so callers never need try/catch.
+ * Fix posture: use better-sqlite3 directly (the same native engine the
+ * memory bridge uses). WAL-native, no whole-file fsync, no race. Keeps
+ * the public API surface identical so callers don't have to change.
+ *
+ * Note: this is the minimum-safe fix. The architecturally cleaner fix
+ * (route writes through the bridge's controller layer) is scoped to a
+ * future ADR — see #2431 for the discussion. Until that ADR lands, this
+ * module owns its own better-sqlite3 handle but on the same file, with
+ * WAL mode enabled (which makes concurrent writers safe by SQLite's own
+ * design — no overlapping fsync).
+ *
+ * The module is designed for fire-and-forget callers — every public
+ * function suppresses errors internally so callers never need try/catch.
  *
  * @module v3/cli/memory/graph-edge-writer
  */
@@ -22,7 +37,7 @@ import { getMemoryRoot } from './memory-initializer.js';
 import { encodeEmbedding } from './embedding-quantization.js';
 
 // ============================================================================
-// Lazy-cached sql.js db handle
+// Lazy-cached better-sqlite3 db handle
 // ============================================================================
 
 let _db: any = null;
@@ -30,13 +45,17 @@ let _dbPath = '';
 let _dbInitializing = false;
 
 /**
- * Return the sql.js Database instance for graph_edges writes.
+ * Return the better-sqlite3 Database instance for graph_edges writes.
  * Creates the graph_edges table if it is absent (idempotent).
- * Returns null if sql.js is not available or db cannot be opened.
+ * Returns null if better-sqlite3 is not available or db cannot be opened.
  *
  * #2246 fix: `createIfMissing` (default false for back-compat) — when true,
  * lazily creates an empty memory.db with the graph_edges schema so
  * graph-pathfinder works on fresh environments before any memory writes.
+ *
+ * #2431 fix: better-sqlite3 + WAL mode replaces sql.js + whole-file
+ * writeFileSync. Eliminates the dual-write race that corrupted memory.db
+ * when called alongside the memory bridge's better-sqlite3 writer.
  */
 export async function getBridgeDb(customDbPath?: string, opts?: { createIfMissing?: boolean }): Promise<any | null> {
   const dbPath = customDbPath ?? path.join(getMemoryRoot(), 'memory.db');
@@ -50,22 +69,44 @@ export async function getBridgeDb(customDbPath?: string, opts?: { createIfMissin
     const dbExists = fs.existsSync(dbPath);
     if (!dbExists && !createIfMissing) return null;
 
-    const initSqlJs = (await import('sql.js')).default;
-    const SQL = await initSqlJs();
-    let db: any;
-    if (dbExists) {
-      const fileBuffer = fs.readFileSync(dbPath);
-      db = new SQL.Database(fileBuffer);
-    } else {
-      // Lazy-create empty DB + ensure parent dir exists.
+    // Ensure parent dir exists for createIfMissing case.
+    if (!dbExists && createIfMissing) {
       const dir = path.dirname(dbPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      db = new SQL.Database();
     }
+
+    // better-sqlite3 may not be available on all platforms (it's a native
+    // module, so platform-specific binaries are required). If unavailable,
+    // return null and let callers degrade gracefully — same posture as the
+    // prior sql.js version when sql.js failed to load.
+    //
+    // The module name is hidden behind a variable so the TypeScript compiler
+    // does not statically resolve and require the `better-sqlite3` types at
+    // build time — they would only be installed via optionalDependencies,
+    // which CI doesn't always install. This is the standard pattern for
+    // runtime-only optional native deps. The actual presence is gated by
+    // the try/catch below.
+    let BetterSqlite3: any;
+    try {
+      const mod: string = 'better-sqlite3';
+      BetterSqlite3 = (await import(mod)).default;
+    } catch {
+      return null;
+    }
+
+    const db = new BetterSqlite3(dbPath);
+
+    // WAL mode is the load-bearing piece of the #2431 fix: it lets multiple
+    // connections (this module + the memory bridge) write to the same file
+    // without overlapping fsyncs corrupting each other. SQLite's WAL is
+    // designed for exactly this case.
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');  // WAL-safe + faster than FULL
+    db.pragma('busy_timeout = 5000');    // wait up to 5s on lock contention
 
     // Ensure graph_edges table exists (in case this is an older DB that
     // predates ADR-130 Phase 1 schema migration).
-    db.run(`
+    db.exec(`
       CREATE TABLE IF NOT EXISTS graph_edges (
         id              TEXT PRIMARY KEY,
         source_id       TEXT NOT NULL,
@@ -79,42 +120,21 @@ export async function getBridgeDb(customDbPath?: string, opts?: { createIfMissin
         embedding_ref   TEXT,
         metadata        TEXT,
         created_at      TEXT NOT NULL
-      )
+      );
+      CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges (source_id);
+      CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges (target_id);
+      CREATE INDEX IF NOT EXISTS idx_graph_edges_relation ON graph_edges (relation);
+      CREATE INDEX IF NOT EXISTS idx_graph_edges_reinforced ON graph_edges (last_reinforced);
     `);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges (source_id)`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges (target_id)`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_graph_edges_relation ON graph_edges (relation)`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_graph_edges_reinforced ON graph_edges (last_reinforced)`);
 
     _db = db;
     _dbPath = dbPath;
-
-    // #2246 — if we just lazy-created the DB, persist the empty file so
-    // subsequent calls can read it back without re-creating.
-    if (!dbExists && createIfMissing) {
-      try {
-        const data = db.export();
-        fs.writeFileSync(dbPath, Buffer.from(data));
-      } catch { /* non-fatal — caller will re-flush on first write */ }
-    }
     return db;
   } catch {
     return null;
   } finally {
     _dbInitializing = false;
   }
-}
-
-/**
- * Persist the in-memory sql.js database back to disk.
- * Called after each write to keep the file consistent.
- */
-async function flushDb(db: any): Promise<void> {
-  try {
-    if (!_dbPath) return;
-    const data = db.export();
-    fs.writeFileSync(_dbPath, Buffer.from(data));
-  } catch { /* non-fatal */ }
 }
 
 // ============================================================================
@@ -139,6 +159,11 @@ export interface GraphEdgeInput {
  * Insert a single edge into graph_edges.
  * Fire-and-forget — errors are suppressed.
  * Returns true if the write succeeded, false otherwise.
+ *
+ * #2431 fix: uses better-sqlite3 prepared statements + implicit WAL
+ * journal. No `fs.writeFileSync` whole-file flush — the WAL handles
+ * durability without overwriting the main file out from under other
+ * writers.
  */
 export async function insertGraphEdge(input: GraphEdgeInput): Promise<boolean> {
   try {
@@ -155,28 +180,26 @@ export async function insertGraphEdge(input: GraphEdgeInput): Promise<boolean> {
 
     const metaStr = input.metadata ? JSON.stringify(input.metadata) : null;
 
-    db.run(
+    db.prepare(
       `INSERT OR IGNORE INTO graph_edges
         (id, source_id, target_id, relation, weight, confidence, decay_rate,
          last_reinforced, witness_id, embedding_ref, metadata, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        id,
-        input.sourceId,
-        input.targetId,
-        input.relation,
-        input.weight ?? 1.0,
-        input.confidence ?? 1.0,
-        input.decayRate ?? 0.0,
-        input.lastReinforced ?? null,
-        input.witnessId ?? null,
-        embeddingRef,
-        metaStr,
-        createdAt,
-      ],
+    ).run(
+      id,
+      input.sourceId,
+      input.targetId,
+      input.relation,
+      input.weight ?? 1.0,
+      input.confidence ?? 1.0,
+      input.decayRate ?? 0.0,
+      input.lastReinforced ?? null,
+      input.witnessId ?? null,
+      embeddingRef,
+      metaStr,
+      createdAt,
     );
 
-    await flushDb(db);
     return true;
   } catch {
     return false;
@@ -201,15 +224,13 @@ export async function queryEdgesBySource(
       : `SELECT id, source_id, target_id, relation, weight FROM graph_edges WHERE source_id = ? LIMIT 1000`;
     const args = relation ? [sourceId, relation] : [sourceId];
 
-    const result = db.exec(sql, args);
-    if (!result?.[0]) return [];
-
-    const cols = result[0].columns;
-    return result[0].values.map((row: unknown[]) => {
-      const obj: Record<string, unknown> = {};
-      cols.forEach((c: string, i: number) => { obj[c] = row[i]; });
-      return obj as any;
-    });
+    return db.prepare(sql).all(...args) as Array<{
+      id: string;
+      source_id: string;
+      target_id: string;
+      relation: string;
+      weight: number;
+    }>;
   } catch {
     return [];
   }
@@ -222,8 +243,8 @@ export async function countGraphEdges(dbPath?: string): Promise<number> {
   try {
     const db = await getBridgeDb(dbPath);
     if (!db) return 0;
-    const result = db.exec(`SELECT COUNT(*) FROM graph_edges`);
-    return (result?.[0]?.values?.[0]?.[0] as number) ?? 0;
+    const row = db.prepare(`SELECT COUNT(*) AS n FROM graph_edges`).get() as { n: number } | undefined;
+    return row?.n ?? 0;
   } catch {
     return 0;
   }
@@ -231,8 +252,15 @@ export async function countGraphEdges(dbPath?: string): Promise<number> {
 
 /**
  * Reset the cached db handle (for tests that need a fresh DB).
+ *
+ * #2431 fix: also explicitly closes the prior handle so file locks
+ * release immediately — better-sqlite3 holds an OS-level file handle
+ * which the prior sql.js implementation did not.
  */
 export function _resetBridgeDb(): void {
+  if (_db) {
+    try { _db.close(); } catch { /* best-effort */ }
+  }
   _db = null;
   _dbPath = '';
 }

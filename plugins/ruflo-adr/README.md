@@ -25,6 +25,7 @@ claude --plugin-dir plugins/ruflo-adr
 | `adr-create` | `/adr-create <title>` | Create a new ADR with sequential numbering and AgentDB registration |
 | `adr-index` | `/adr-index` | Build or rebuild the ADR index and dependency graph in AgentDB |
 | `adr-review` | `/adr-review [--branch BRANCH]` | Review code changes against accepted ADRs for compliance violations |
+| `adr-verify` | `/adr-verify` | Read back adr-patterns + adr-edges namespaces, surface dangling refs / supersede cycles / status mismatches; exits 1 on cycles |
 
 ## Commands (7 subcommands)
 
@@ -65,7 +66,7 @@ This plugin owns the `adr-patterns` AgentDB namespace. It defers to [ruflo-agent
 
 ```bash
 bash plugins/ruflo-adr/scripts/smoke.sh
-# Expected: "10 passed, 0 failed"
+# Expected: "15 passed, 0 failed"
 ```
 
 ## Architecture Decisions

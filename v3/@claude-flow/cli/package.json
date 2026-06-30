@@ -1,6 +1,6 @@
 {
   "name": "@claude-flow/cli",
-  "version": "3.10.46",
+  "version": "3.16.2",
   "type": "module",
   "description": "Ruflo CLI - Enterprise AI agent orchestration with 60+ specialized agents, swarm coordination, MCP server, self-learning hooks, and vector memory for Claude Code",
   "main": "dist/src/index.js",
@@ -78,6 +78,7 @@
     "bin",
     "scripts",
     ".claude",
+    "plugins",
     "README.md"
   ],
   "scripts": {
@@ -86,32 +87,39 @@
     "test:plugin-store": "npx tsx src/plugins/tests/standalone-test.ts",
     "test:pattern-store": "npx tsx src/transfer/store/tests/standalone-test.ts",
     "postinstall": "node ./scripts/postinstall.cjs",
-    "prepublishOnly": "cp ../../../README.md ./README.md",
+    "prepublishOnly": "cp ../../../README.md ./README.md && rm -rf plugins && mkdir -p plugins && cp -r ../../../plugins/ruflo-metaharness plugins/",
     "release": "npm version prerelease --preid=alpha && npm run publish:all",
     "publish:all": "./scripts/publish.sh"
   },
   "devDependencies": {
     "typescript": "^5.3.0",
-    "vitest": "^4.0.16"
+    "vitest": "^4.1.0"
   },
   "dependencies": {
-    "@claude-flow/cli-core": "^3.7.0-alpha.5",
-    "@claude-flow/mcp": "^3.0.0-alpha.8",
-    "@claude-flow/neural": "^3.0.0-alpha.9",
-    "@claude-flow/shared": "^3.0.0-alpha.7",
-    "@noble/ed25519": "^2.1.0",
-    "@ruvector/rabitq-wasm": "^0.1.0",
-    "semver": "^7.6.0",
+    "@claude-flow/cli-core": "3.7.0-alpha.5",
+    "@claude-flow/mcp": "3.0.0-alpha.8",
+    "@claude-flow/neural": "3.0.0-alpha.9",
+    "@claude-flow/shared": "3.0.0-alpha.7",
+    "@noble/ed25519": "2.3.0",
+    "@ruvector/rabitq-wasm": "0.1.0",
+    "semver": "7.7.3",
     "yaml": "^2.8.0"
   },
   "optionalDependencies": {
+    "agentbbs": "~0.1.0",
+    "agenticow": "~0.2.3",
     "@claude-flow/aidefence": "^3.0.2",
     "@claude-flow/codex": "^3.0.0-alpha.8",
     "@claude-flow/embeddings": "^3.0.0-alpha.18",
     "@claude-flow/guidance": "^3.0.0-alpha.1",
-    "@claude-flow/memory": "^3.0.0-alpha.20",
+    "@claude-flow/memory": "^3.0.0-alpha.21",
     "@claude-flow/plugin-gastown-bridge": "^0.1.3",
     "@claude-flow/security": "^3.0.0-alpha.10",
+    "@metaharness/darwin": "~0.3.1",
+    "@metaharness/kernel": "~0.1.0",
+    "@metaharness/redblue": "~0.1.1",
+    "@metaharness/router": "~0.3.2",
+    "metaharness": "~0.2.6",
     "@ruvector/attention": "^0.1.32",
     "@ruvector/attention-darwin-arm64": "0.1.32",
     "@ruvector/diskann": "^0.1.0",
@@ -120,7 +128,8 @@
     "@ruvector/ruvllm-wasm": "^2.0.2",
     "@ruvector/rvagent-wasm": "^0.1.0",
     "@ruvector/sona": "^0.1.6",
-    "agentdb": "^3.0.0-alpha.16",
+    "@ruvector/tiny-dancer": "^0.1.22",
+    "agentdb": "^3.0.0-alpha.17",
     "agentic-flow": "^3.0.0-alpha.1",
     "ruvector": "^0.2.27"
   },

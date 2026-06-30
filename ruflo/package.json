@@ -1,6 +1,6 @@
 {
   "name": "ruflo",
-  "version": "3.10.46",
+  "version": "3.16.2",
   "description": "Ruflo - Enterprise AI agent orchestration platform. Deploy 60+ specialized agents in coordinated swarms with self-learning, fault-tolerant consensus, vector memory, and MCP integration",
   "main": "bin/ruflo.js",
   "type": "module",
@@ -42,6 +42,13 @@
   "dependencies": {
     "@claude-flow/cli": "^3.10.3"
   },
+  "optionalDependencies": {
+    "metaharness": "~0.2.6",
+    "@metaharness/router": "~0.3.2",
+    "@metaharness/kernel": "~0.1.0",
+    "@metaharness/darwin": "~0.3.1",
+    "@metaharness/redblue": "~0.1.1"
+  },
   "overrides": {
     "ruvector": "^0.2.27",
     "better-sqlite3": ">=12.8.0",
@@ -71,7 +78,8 @@
     "@opentelemetry/otlp-exporter-base": "0.52.1",
     "@opentelemetry/otlp-grpc-exporter-base": "0.52.1",
     "@opentelemetry/otlp-transformer": "0.52.1",
-    "agentdb": ">=3.0.0-alpha.16"
+    "agentdb": ">=3.0.0-alpha.17",
+    "agentic-flow": ">=2.0.14"
   },
   "engines": {
     "node": ">=20.0.0"

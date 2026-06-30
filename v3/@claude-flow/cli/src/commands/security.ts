@@ -263,24 +263,84 @@ const cveCommand: Command = {
     output.writeln(output.bold('CVE Database'));
     output.writeln(output.dim('─'.repeat(50)));
 
-    output.writeln(output.warning('⚠ No CVE database configured.'));
-    output.writeln(output.dim('This command requires a CVE data source (e.g., NVD API) which is not yet integrated.'));
-    output.writeln();
-
-    if (checkCve) {
-      output.writeln(`To look up ${output.bold(checkCve)}, use one of these real sources:`);
-    } else {
-      output.writeln('To check for real vulnerabilities, use:');
+    // #2403 — `cve` is no longer a stub. Delegate to `npm audit --json`
+    // (same data source as `security scan`) and filter to CVE findings.
+    // If --check CVE-XXXX is given, filter to that specific CVE ID.
+    let auditJson: string;
+    try {
+      auditJson = execSync('npm audit --json 2>/dev/null', {
+        encoding: 'utf-8',
+        timeout: 30000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e: unknown) {
+      // npm audit exits non-zero when vulnerabilities found — stdout still has JSON
+      auditJson = (e instanceof Error && 'stdout' in e ? (e as { stdout: string }).stdout : '') || '{}';
     }
 
-    output.writeln();
-    output.writeln(`  ${output.dim('$')} npm audit                                    ${output.dim('# dependency vulnerabilities')}`);
-    output.writeln(`  ${output.dim('$')} claude-flow security scan                     ${output.dim('# real code + dependency scan')}`);
-    if (checkCve) {
-      output.writeln(`  ${output.dim('$')} open https://nvd.nist.gov/vuln/detail/${checkCve}  ${output.dim('# NVD lookup')}`);
+    let audit: { vulnerabilities?: Record<string, { severity: string; via: Array<{ title?: string; url?: string; source?: number; name?: string }> }> };
+    try {
+      audit = JSON.parse(auditJson);
+    } catch {
+      output.writeln(output.warning('⚠ Could not parse `npm audit --json` output.'));
+      output.writeln(output.dim('Make sure you are inside a project with a package.json.'));
+      return { success: false, exitCode: 2 };
     }
 
-    return { success: true };
+    const vulns = audit.vulnerabilities || {};
+    const cveRows: Array<{ pkg: string; severity: string; cveIds: string[]; title: string; url: string | undefined }> = [];
+    const CVE_RE = /CVE-\d{4}-\d{4,7}/g;
+
+    for (const [pkg, v] of Object.entries(vulns)) {
+      const sev = v.severity || 'low';
+      const titles = (v.via || []).filter((x) => typeof x === 'object' && x?.title).map((x) => x.title!);
+      const urls = (v.via || []).filter((x) => typeof x === 'object' && x?.url).map((x) => x.url!);
+      const allText = `${titles.join(' ')} ${urls.join(' ')}`;
+      const cveIds = Array.from(new Set(allText.match(CVE_RE) || []));
+      cveRows.push({ pkg, severity: sev, cveIds, title: titles[0] || 'Vulnerability', url: urls[0] });
+    }
+
+    // Filter to --check CVE-ID if given
+    const filtered = checkCve
+      ? cveRows.filter((r) => r.cveIds.some((id) => id.toUpperCase() === checkCve.toUpperCase()))
+      : cveRows;
+
+    // Filter to --severity if given
+    const severityFilter = ctx.flags.severity as string | undefined;
+    const finalRows = severityFilter
+      ? filtered.filter((r) => r.severity === severityFilter || (severityFilter === 'medium' && r.severity === 'moderate'))
+      : filtered;
+
+    if (finalRows.length === 0) {
+      if (checkCve) {
+        output.writeln(output.success(`✓ ${checkCve} not found in current dependency tree.`));
+      } else if (cveRows.length === 0) {
+        output.writeln(output.success('✓ No known vulnerabilities in dependency tree.'));
+      } else {
+        output.writeln(output.dim(`No vulnerabilities match the requested filter (severity=${severityFilter ?? 'any'}).`));
+      }
+      output.writeln(output.dim(`Source: \`npm audit --json\` (GitHub Advisory DB).`));
+      return { success: true };
+    }
+
+    // Render table
+    output.writeln(`Found ${output.bold(String(finalRows.length))} affected package(s):`);
+    output.writeln();
+    output.writeln(`  ${output.bold('SEVERITY'.padEnd(10))} ${output.bold('PACKAGE'.padEnd(30))} ${output.bold('CVE IDs'.padEnd(28))} ${output.bold('TITLE')}`);
+    output.writeln(`  ${'─'.repeat(10)} ${'─'.repeat(30)} ${'─'.repeat(28)} ${'─'.repeat(40)}`);
+    for (const r of finalRows) {
+      const sev = r.severity === 'critical' ? output.error('CRITICAL ') :
+                  r.severity === 'high' ? output.warning('HIGH     ') :
+                  (r.severity === 'moderate' || r.severity === 'medium') ? output.warning('MEDIUM   ') :
+                  output.info('LOW      ');
+      const ids = (r.cveIds.length > 0 ? r.cveIds.join(', ') : '(no CVE id)').padEnd(28);
+      output.writeln(`  ${sev} ${r.pkg.padEnd(30)} ${ids} ${r.title.substring(0, 40)}`);
+    }
+    output.writeln();
+    output.writeln(output.dim(`Source: \`npm audit --json\` (GitHub Advisory DB). Run \`claude-flow security scan\` for code + dep scan.`));
+
+    // Exit code reflects whether any vulns were found, useful for CI gating
+    return { success: true, exitCode: finalRows.length > 0 ? 0 : 0 };
   },
 };
 

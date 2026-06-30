@@ -35,7 +35,24 @@ const CLI_PKG = process.env.CLI_CORE === '1'
   : '@claude-flow/cli@latest';
 
 const ROOT = process.env.ADR_ROOT || process.cwd();
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'v2', '.next', '.turbo', 'build']);
+// #2474 bonus: \`.claude/worktrees/*\` mirrors the repo so every ADR was
+// indexed 2-3x. Skip the whole \`.claude\` tree — it's all ruflo runtime
+// state (worktrees, scheduled tasks, etc.), never authored content.
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'v2', '.next', '.turbo', 'build', '.claude']);
+
+// #2474 Bug 4: parseId padded ADR numbers, but extractAdrRefs's
+// padStart-then-strip pipeline produced different results for the same
+// numeric value. A repo mixing `0001-foo.md` (parseId → ADR-0001) with
+// a body line `Supersedes: ADR-0001` (extractAdrRefs → ADR-001) drops
+// every edge as dangling. Single normalizer keeps both paths in lockstep.
+function normalizeAdrId(raw) {
+  const digits = String(raw).replace(/^ADR-?/i, '').trim();
+  if (!/^\d+$/.test(digits)) return `ADR-${raw}`;
+  // Canonical form: ≤3 digits → zero-pad to 3 (legacy default);
+  // ≥4 digits → keep as-is. Either way, the same numeric input from
+  // a filename and from a body reference now produce the same key.
+  return digits.length >= 4 ? `ADR-${digits}` : `ADR-${digits.padStart(3, '0')}`;
+}
 
 function findAdrs(dir, out = []) {
   let entries;
@@ -70,14 +87,11 @@ function parseId(path, text) {
   const fm = /^---\s*$([\s\S]*?)^---\s*$/m.exec(text);
   if (fm) {
     const m = /^id:\s*(\S+)/m.exec(fm[1]);
-    if (m) return m[1].toUpperCase();
+    if (m) return normalizeAdrId(m[1]);
   }
   const fname = basename(path, '.md');
   const m = /^(ADR-?\d+|\d{3,4})/i.exec(fname);
-  if (m) {
-    const raw = m[1];
-    return raw.toUpperCase().startsWith('ADR') ? raw.toUpperCase().replace(/^ADR-?/, 'ADR-') : `ADR-${raw}`;
-  }
+  if (m) return normalizeAdrId(m[1]);
   return fname;
 }
 
@@ -97,9 +111,15 @@ function parseStatus(text) {
     const m = /^status:\s*(.+)$/im.exec(fm[1]);
     if (m) return m[1].trim();
   }
-  // Match `**Status**:` plus `**Status**:` with possible adornments.
+  // #2474 Bug 2: also accept `**Status:**` (colon inside the bold span),
+  // the widely-used Nygard / MADR style. Previous regex only matched
+  // `**Status**:` (colon outside) and dropped every Nygard-style ADR
+  // to status=Unknown. Now the colon can sit on either side of the `**`.
   // Strip parenthetical qualifiers like "Proposed (v3.6.x)" -> "Proposed".
-  const m = /^\*\*Status\*\*:\s*([A-Za-z][A-Za-z\- ]*?)(?:\s*\(.*?\))?\s*$/m.exec(text);
+  let m = /^\*\*Status:?\*\*:?\s*([A-Za-z][A-Za-z\- ]*?)(?:\s*\(.*?\))?\s*$/m.exec(text);
+  if (m) return m[1].trim();
+  // Also handle full-bold MADR style: **Status: Value** (entire phrase bolded)
+  m = /^\*\*Status:\s*([A-Za-z][A-Za-z\- ]*?)(?:\s*\([^)]*\))?\*\*\s*$/m.exec(text);
   return m ? m[1].trim() : 'Unknown';
 }
 
@@ -154,14 +174,18 @@ function parseLinks(text, selfId) {
       }
     }
   }
-  // Body relationship lines
-  const supersedes = /\*\*Supersedes\*\*:\s*(.+)$/m.exec(text);
+  // Body relationship lines. #2474 Bug 3: loosened to accept both colon
+  // placements (`**Supersedes:**` and `**Supersedes**:`) and an optional
+  // parenthetical qualifier like `**Supersedes (partial):**` — same
+  // tolerance as parseStatus.
+  const REL = (label) => new RegExp(`^\\*\\*${label}(?:\\s*\\([^)]*\\))?:?\\*\\*:?\\s*(.+)$`, 'mi');
+  const supersedes = REL('Supersedes').exec(text);
   if (supersedes) for (const ref of extractAdrRefs(supersedes[1])) out.push({ from: ref, to: selfId, relation: 'supersedes' });
-  const amended = /\*\*(?:Amended[ -]by|Amends)\*\*:\s*(.+)$/m.exec(text);
+  const amended = REL('(?:Amended[ -]by|Amends)').exec(text);
   if (amended) for (const ref of extractAdrRefs(amended[1])) out.push({ from: selfId, to: ref, relation: 'amends' });
-  const related = /\*\*Related\*\*:\s*(.+)$/m.exec(text);
+  const related = REL('Related').exec(text);
   if (related) for (const ref of extractAdrRefs(related[1])) out.push({ from: selfId, to: ref, relation: 'related' });
-  const dependsOn = /\*\*Depends[ -]on\*\*:\s*(.+)$/m.exec(text);
+  const dependsOn = REL('Depends[ -]on').exec(text);
   if (dependsOn) for (const ref of extractAdrRefs(dependsOn[1])) out.push({ from: selfId, to: ref, relation: 'depends-on' });
   return out;
 }
@@ -177,16 +201,31 @@ function extractAdrRefs(s) {
     .replace(/`[^`]*`/g, '');             // any backtick-quoted span
   const re = /\bADR-?(\d+)\b/gi;
   let m;
-  while ((m = re.exec(cleaned))) refs.add(`ADR-${m[1].padStart(3, '0').replace(/^0+(\d{3,})/, '$1')}`);
+  // #2474 Bug 4: route every ADR ref through the same normalizer parseId
+  // uses, so a Supersedes: ADR-0001 line lands on the same node key as
+  // the file ADR-0001.md (was: padStart-then-strip produced ADR-001).
+  while ((m = re.exec(cleaned))) refs.add(normalizeAdrId(m[1]));
   return [...refs];
 }
 
 function memoryStore(namespace, key, value) {
+  const valueStr = typeof value === 'string' ? value : JSON.stringify(value);
+  // #2474 Bug 1 (fatal): ADR titles like "ADR-005 — Repository …" contain
+  // a U+2014 em-dash. \`npm exec\` runs argv validation BEFORE handing args
+  // to the underlying bin, and \`commander\`-style argv with a non-ASCII
+  // dash that starts an arg makes it reject with:
+  //   npm error arg Argument starts with non-ascii dash, this is probably invalid: — …
+  // Result: every store failed → \`Records stored: 0/N\`.
+  //
+  // Use the \`--flag=value\` form so npm sees a single \`--value=…\` token
+  // and doesn't try to interpret the leading character of the value.
+  // This works on both legacy and current npm; the underlying CLI accepts
+  // \`--flag=value\` and \`--flag value\` equivalently.
   const r = spawnSync('npx', [
     CLI_PKG, 'memory', 'store',
-    '--namespace', namespace,
-    '--key', key,
-    '--value', typeof value === 'string' ? value : JSON.stringify(value),
+    `--namespace=${namespace}`,
+    `--key=${key}`,
+    `--value=${valueStr}`,
   ], { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf-8' });
   if (r.status !== 0) {
     if (/UNIQUE constraint/i.test(r.stderr || r.stdout || '')) return 'exists';

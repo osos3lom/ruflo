@@ -56,6 +56,21 @@ function tokenize(text) {
   return text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(function(w) { return w.length > 2; });
 }
 
+// ── Truncation transparency (FIX 4) ─────────────────────────────────────────
+// Silently severing stored values means later reasoning can be built on
+// incomplete text. Warn (debug-gated) and mark the cut point with an ellipsis
+// so it is visible that the value was clipped.
+var DEBUG = !!(process.env.RUFLO_DEBUG || process.env.DEBUG);
+function clip(text, max, label) {
+  text = text == null ? "" : String(text);
+  if (text.length <= max) return text;
+  if (DEBUG) {
+    process.stderr.write("[INTELLIGENCE] WARN: truncated " + (label || "value") +
+      " from " + text.length + " to " + max + " chars\n");
+  }
+  return text.slice(0, max - 1) + "…";
+}
+
 // ── Deduplication helper (fixes #1518) ──────────────────────────────────────
 function deduplicateById(entries) {
   if (!entries || !Array.isArray(entries)) return entries;
@@ -73,8 +88,14 @@ function deduplicateById(entries) {
 
 function bootstrapFromMemoryFiles() {
   var entries = [];
-  // Scope to current project only (not all 51+ project dirs)
-  var projectSlug = process.cwd().replace(/^\//, '').replace(/\//g, '-');
+  // Scope to current project only (not all 51+ project dirs).
+  // Match Claude Code's project-dir slug convention: every non-alphanumeric char
+  // becomes '-' (e.g. "G:\\My Drive\\TJ_Vault" -> "G--My-Drive-TJ-Vault"). The old
+  // version only stripped a leading '/' and replaced '/', so on Windows the slug
+  // kept ':' and '\\' and never matched the real ~/.claude/projects/<slug> dir —
+  // memory bootstrap then silently found nothing (FIX 5). Runs are NOT collapsed:
+  // Claude emits "G--My" because ':' and '\\' each map to their own '-'.
+  var projectSlug = process.cwd().replace(/[^a-zA-Z0-9]/g, '-');
   var candidates = [
     path.join(os.homedir(), ".claude", "projects", projectSlug, "memory"),
     path.join(process.cwd(), ".claude-flow", "memory"),
@@ -101,14 +122,15 @@ function bootstrapFromMemoryFiles() {
           for (var s = 0; s < sections.length; s++) {
             var lines = sections[s].split("\n");
             var title = lines[0] ? lines[0].trim() : "section-" + s;
+            var clippedContent = clip(sections[s], 500, "memory content");
             entries.push({
               id: "mem-" + entries.length,
-              content: sections[s].substring(0, 500),
-              summary: title.substring(0, 100),
+              content: clippedContent,
+              summary: clip(title, 100, "memory summary"),
               category: "memory",
               confidence: 0.5,
               sourceFile: files[k],
-              words: tokenize(sections[s].substring(0, 500)),
+              words: tokenize(clippedContent),
             });
           }
         } catch (e) { /* skip */ }

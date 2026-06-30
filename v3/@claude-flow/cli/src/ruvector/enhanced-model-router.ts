@@ -72,6 +72,15 @@ export interface EnhancedRouteResult {
   canSkipLLM?: boolean;
   estimatedLatencyMs: number;
   estimatedCost: number;
+  // ADR-149 — forwarded from the underlying ModelRouter when the cost-optimal
+  // neural backend contributed. `modelId` is the concrete picked model
+  // (e.g. `inclusionai/ling-2.6-flash`); `routedBy` reflects the decision
+  // mechanism ('hybrid' | 'bandit-fallback' | 'heuristic'); `provider` +
+  // `openrouterModel` are the execution-layer hint pair.
+  modelId?: string;
+  routedBy?: 'hybrid' | 'bandit-fallback' | 'heuristic';
+  provider?: 'anthropic' | 'openrouter';
+  openrouterModel?: string;
 }
 
 /**
@@ -370,7 +379,7 @@ export class EnhancedModelRouter {
   /**
    * Route a task to the optimal tier and handler
    */
-  async route(task: string, context?: { filePath?: string }): Promise<EnhancedRouteResult> {
+  async route(task: string, context?: { filePath?: string; embedding?: number[] }): Promise<EnhancedRouteResult> {
     // Step 1: Deterministic codemod detection (ADR-143).
     // Only intents that a codemod can apply *deterministically and safely* skip
     // the LLM. Intents that need inference (add-types, add-error-handling,
@@ -457,7 +466,10 @@ export class EnhancedModelRouter {
     }
 
     // Step 4: Text-based complexity via the local heuristic + bandit router.
-    const baseResult = await this.baseRouter.route(task);
+    // ADR-149 — forward the optional embedding so the cost-optimal neural
+    // path can fire. Without it, base routing falls back to heuristic+bandit
+    // and the per-model Pareto wins from the measured seed corpus are lost.
+    const baseResult = await this.baseRouter.route(task, context?.embedding);
 
     // Step 5: Combine AST complexity with the text-routing result.
     // Also boost if a single tier3 keyword is found.
@@ -473,6 +485,18 @@ export class EnhancedModelRouter {
     // Step 6: Determine tier based on complexity
     const { haiku, sonnet } = this.config.complexityThresholds;
 
+    // ADR-149 — forward the per-model fields from baseResult onto every
+    // tier-2/3 return. This keeps the cost-optimal pick alive end-to-end:
+    // if the neural backend picked Ling for a cheap task, the enhanced
+    // router surfaces `modelId: 'inclusionai/ling-2.6-flash'` alongside
+    // `model: 'haiku'` so downstream consumers can dispatch via OpenRouter.
+    const neuralFields = {
+      ...(baseResult.modelId ? { modelId: baseResult.modelId } : {}),
+      ...(baseResult.routedBy ? { routedBy: baseResult.routedBy } : {}),
+      ...(baseResult.provider ? { provider: baseResult.provider } : {}),
+      ...(baseResult.openrouterModel ? { openrouterModel: baseResult.openrouterModel } : {}),
+    };
+
     if (finalComplexity < haiku) {
       return {
         tier: 2,
@@ -484,6 +508,7 @@ export class EnhancedModelRouter {
         canSkipLLM: false,
         estimatedLatencyMs: 500,
         estimatedCost: 0.0002,
+        ...neuralFields,
       };
     }
 
@@ -498,6 +523,7 @@ export class EnhancedModelRouter {
         canSkipLLM: false,
         estimatedLatencyMs: 2000,
         estimatedCost: 0.003,
+        ...neuralFields,
       };
     }
 
@@ -511,6 +537,7 @@ export class EnhancedModelRouter {
       canSkipLLM: false,
       estimatedLatencyMs: 5000,
       estimatedCost: 0.015,
+      ...neuralFields,
     };
   }
 

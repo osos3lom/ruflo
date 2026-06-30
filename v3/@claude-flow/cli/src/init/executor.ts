@@ -360,13 +360,69 @@ function mergeSettingsForUpgrade(existing: Record<string, unknown>): Record<stri
 
   // 3. Fix statusLine config (remove invalid fields, ensure correct format)
   // Claude Code only supports: type, command, padding
+  //
+  // #2448 — Detect and REGENERATE the runaway `npx @claude-flow/cli@latest`
+  // statusline form. Pre-#2337 init wrote this to settings.json; it spawns
+  // a cold Node process + npm registry round-trip on every fire (statusline
+  // refires every few hundred ms), which on macOS produced load average 49
+  // / jetsam / kernel panic. Preserving the user's existing command (the
+  // old behavior here) means anyone who installed pre-#2337 and upgraded
+  // never gets the fix. Now we detect the broken form and overwrite.
+  const NEW_STATUSLINE_CMD =
+    `node -e "var c=require('child_process'),p=require('path'),r;try{r=c.execSync('git rev-parse --show-toplevel',{encoding:'utf8'}).trim()}catch(e){r=process.cwd()}var s=p.join(r,'.claude/helpers/statusline.cjs');process.argv.splice(1,0,s);require(s)"`;
+  // Matches any invocation of `claude-flow hooks statusline` — either via npx
+  // (`npx [--prefer-offline] [@]claude-flow[/cli][@<tag>] hooks statusline …`)
+  // or as a bare command (`claude-flow hooks statusline …`). Both forms cold-
+  // load the ONNX model on every fire (~1s); Claude Code times out and hides
+  // the status bar (#2450). The migration replaces the whole command with
+  // NEW_STATUSLINE_CMD which invokes the local helper directly via `node -e`.
+  const BROKEN_STATUSLINE_RE = /(?:npx\s+(?:--?\S+\s+)*)?@?claude-flow(?:\/cli)?(?:@\S+)?\s+hooks\s+statusline/;
   const existingStatusLine = existing.statusLine as Record<string, unknown> | undefined;
   if (existingStatusLine) {
+    const existingCmd = typeof existingStatusLine.command === 'string' ? existingStatusLine.command : '';
+    const isBroken = BROKEN_STATUSLINE_RE.test(existingCmd);
     merged.statusLine = {
       type: 'command',
-      command: existingStatusLine.command || `node -e "var c=require('child_process'),p=require('path'),r;try{r=c.execSync('git rev-parse --show-toplevel',{encoding:'utf8'}).trim()}catch(e){r=process.cwd()}var s=p.join(r,'.claude/helpers/statusline.cjs');process.argv.splice(1,0,s);require(s)"`,
+      command: isBroken || !existingCmd ? NEW_STATUSLINE_CMD : existingCmd,
       // Remove invalid fields: refreshMs, enabled (not supported by Claude Code)
     };
+  }
+
+  // #2448 — Detect and REGENERATE per-action hook commands that still use
+  // the runaway `npx @claude-flow/cli@latest hooks <sub>` form. These fire
+  // on every PreToolUse/PostToolUse/UserPromptSubmit, each spawning ~130 MB
+  // of cold Node + npm registry resolution; the storm is what kernel-paniced
+  // the reporter's machine in #2448.
+  //
+  // We walk each hook event's `hooks[]` and swap any command matching the
+  // broken pattern for the local-helper form. Idempotent: re-running this
+  // migration on already-correct settings is a no-op.
+  const BROKEN_HOOK_RE = /npx\s+(?:--?\S+\s+)*@?claude-flow\/cli@latest\s+hooks\s+(\S+)/;
+  const localHookCmd = (sub: string): string => {
+    // POSIX form mirrors settings-generator.ts::hookCmd() exactly.
+    // Windows users hit a separate code path (cmd /c …) — Claude Code on
+    // Windows is rarer and the migration there is left to a follow-up.
+    if (process.platform === 'win32') {
+      return `cmd /c "IF EXIST \"%CLAUDE_PROJECT_DIR%\\.claude\\helpers\\hook-handler.cjs\" (node \"%CLAUDE_PROJECT_DIR%\\.claude\\helpers\\hook-handler.cjs\" ${sub}) ELSE (node \"%USERPROFILE%\\.claude\\helpers\\hook-handler.cjs\" ${sub})"`;
+    }
+    return `sh -c 'D="\${CLAUDE_PROJECT_DIR:-.}"; [ -f "$D/.claude/helpers/hook-handler.cjs" ] || D="\${HOME}"; exec node "$D/.claude/helpers/hook-handler.cjs" ${sub}'`;
+  };
+  const mergedHooks = merged.hooks as Record<string, unknown> | undefined;
+  if (mergedHooks) {
+    for (const eventName of Object.keys(mergedHooks)) {
+      const groups = mergedHooks[eventName] as Array<{ hooks?: Array<{ type?: string; command?: string; timeout?: number }> }> | undefined;
+      if (!Array.isArray(groups)) continue;
+      for (const group of groups) {
+        if (!Array.isArray(group.hooks)) continue;
+        for (const h of group.hooks) {
+          if (typeof h?.command !== 'string') continue;
+          const m = BROKEN_HOOK_RE.exec(h.command);
+          if (!m) continue;
+          // Subcommand captured (e.g. "pre-bash", "post-edit", "route") — keep it.
+          h.command = localHookCmd(m[1]);
+        }
+      }
+    }
   }
 
   // 4. Merge claudeFlow settings (preserve existing, add agentTeams + memory)

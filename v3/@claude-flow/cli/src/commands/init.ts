@@ -417,17 +417,38 @@ const initAction = async (ctx: CommandContext): Promise<CommandResult> => {
         }
       }
 
-      // Start daemon
+      // Start daemon — #2407 fix
+      //
+      // The previous version used `daemon start ... &` (shell background)
+      // which made execSync return as soon as the shell forked, BEFORE the
+      // daemon process wrote its PID file. Concurrent init runs
+      // (devcontainer setup + VS Code task + MCP hook firing within ~500 ms)
+      // all saw an empty PID file via getBackgroundDaemonPid(), so
+      // daemon.ts:99-103's dedup short-circuit didn't fire — every caller
+      // spawned its own daemon. One incident accumulated 39 zombie daemons
+      // holding ~8.5 GiB resident, which together with macOS compressor
+      // pressure (27 GiB compressed) caused the configd watchdog timeout
+      // and the 2026-06-15 21:06 kernel panic.
+      //
+      // Fix: drop the shell `&`. `daemon start` (default non-foreground
+      // mode) already forks its own detached background process via
+      // startBackgroundDaemon() AND writes the PID file BEFORE returning,
+      // so execSync without `&` waits for the dedup-relevant PID-file
+      // write but does NOT wait for the daemon itself to exit. Timeout
+      // bumped to 30s for npx cold-cache scenarios.
       if (startDaemon) {
         try {
           output.writeln(output.dim('  Starting daemon...'));
-          execSync('npx @claude-flow/cli@latest daemon start 2>/dev/null &', {
+          execSync('npx @claude-flow/cli@latest daemon start 2>/dev/null', {
             stdio: 'pipe',
             cwd: ctx.cwd,
-            timeout: 10000
+            timeout: 30000
           });
           output.writeln(output.success('  ✓ Daemon started'));
         } catch {
+          // Daemon dedup hit (already running) OR spawn timed out.
+          // Either way the worst case is a single retry on next init,
+          // not a forked race producing N zombies.
           output.writeln(output.warning('  Daemon may already be running'));
         }
       }
@@ -494,6 +515,9 @@ const initAction = async (ctx: CommandContext): Promise<CommandResult> => {
         `Run ${output.highlight(`${bin} swarm init`)} to initialize a swarm`,
         `Or use ${output.highlight(`${bin} init --start-all`)} to do all of the above`,
         options.components.settings ? `Review ${output.highlight('.claude/settings.json')} for hook configurations` : '',
+        // ADR-150 — surface the new metaharness scorecard to every new user.
+        // Optional dep; the command degrades gracefully when not installed.
+        `Run ${output.highlight(`${bin} metaharness score`)} for a 5-dim harness readiness scorecard (ADR-150)`,
       ].filter(Boolean));
     }
 

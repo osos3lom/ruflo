@@ -59,7 +59,11 @@ const result = spawnSync(
       FORCE_COLOR: '0',
     },
     encoding: 'utf8',
-    timeout: 60_000,
+    // iter 123 → 131 — bumped from 180s to 300s. macos-latest observed
+    // running exactly 180s before the timer fired (CI cold ONNX download
+    // + agentic-flow init + MCP server spawn). 300s leaves room for the
+    // smoke's assertion phase under the job's 10-min cap.
+    timeout: 300_000,
     // Don't fail if the command exits non-zero — init may partially succeed
   }
 );

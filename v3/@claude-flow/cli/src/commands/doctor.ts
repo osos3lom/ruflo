@@ -133,6 +133,85 @@ async function checkConfigFile(): Promise<HealthCheck> {
 }
 
 // Check daemon status
+/**
+ * #2448 — Detect the runaway `npx @claude-flow/cli@latest` statusLine / hook
+ * commands left over in `.claude/settings.json` from pre-#2337 installs.
+ *
+ * These fire on every Claude Code event (statusLine refires every few hundred
+ * ms, hooks fire per tool-use), each spawning a cold Node process + npm
+ * registry round-trip. On the reporter's 48 GB macOS box this produced
+ * load average 49, jetsam, and a kernel watchdog panic two minutes after
+ * boot. Severity is CRITICAL when present; users who installed before #2337
+ * and never re-ran `ruflo init` still have it.
+ *
+ * Detection only — does not modify settings. Fix path is `ruflo init` (the
+ * executor's migration logic, also patched in #2448, will now regenerate
+ * the broken commands).
+ */
+async function checkStaleSettingsNpx(): Promise<HealthCheck> {
+  // Same regex pattern the executor migration uses — kept in sync.
+  const BROKEN_RE = /npx\s+(?:--?\S+\s+)*@?claude-flow\/cli@latest\s+hooks\s+(?:statusline|\S+)/;
+
+  // Look in both project-local and home-dir settings.
+  const candidates = [
+    join(process.cwd(), '.claude', 'settings.json'),
+    join(process.env.HOME ?? '', '.claude', 'settings.json'),
+  ].filter((p, i, a) => p && a.indexOf(p) === i);
+
+  const offenders: Array<{ path: string; where: string }> = [];
+  for (const settingsPath of candidates) {
+    if (!existsSync(settingsPath)) continue;
+    let settings: Record<string, unknown>;
+    try {
+      settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    } catch {
+      continue; // checkConfigFile reports JSON errors separately
+    }
+
+    // statusLine.command
+    const sl = settings.statusLine as { command?: string } | undefined;
+    if (sl?.command && BROKEN_RE.test(sl.command)) {
+      offenders.push({ path: settingsPath, where: 'statusLine' });
+    }
+
+    // hooks.<event>[].hooks[].command
+    const hooks = settings.hooks as Record<string, Array<{ hooks?: Array<{ command?: string }> }>> | undefined;
+    if (hooks) {
+      for (const [eventName, groups] of Object.entries(hooks)) {
+        if (!Array.isArray(groups)) continue;
+        for (const group of groups) {
+          if (!Array.isArray(group.hooks)) continue;
+          for (const h of group.hooks) {
+            if (typeof h?.command === 'string' && BROKEN_RE.test(h.command)) {
+              offenders.push({ path: settingsPath, where: `hooks.${eventName}` });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (offenders.length === 0) {
+    return { name: 'Stale npx@latest in settings (#2448)', status: 'pass', message: 'no runaway commands detected' };
+  }
+
+  // Group by file for readable output
+  const byFile = offenders.reduce((acc, o) => {
+    (acc[o.path] ??= []).push(o.where);
+    return acc;
+  }, {} as Record<string, string[]>);
+  const summary = Object.entries(byFile)
+    .map(([p, wheres]) => `${p} [${[...new Set(wheres)].join(', ')}]`)
+    .join('; ');
+
+  return {
+    name: 'Stale npx@latest in settings (#2448)',
+    status: 'fail',
+    message: `CRITICAL — runaway \`npx @claude-flow/cli@latest\` commands detected: ${summary}`,
+    fix: 'Re-run `npx ruflo init` to migrate (the v3.13.3+ init migrator regenerates these to local-helper form). On macOS this prevents the process-storm / kernel-panic class reported in #2448.',
+  };
+}
+
 async function checkDaemonStatus(): Promise<HealthCheck> {
   try {
     const pidFile = '.claude-flow/daemon.pid';
@@ -552,6 +631,229 @@ async function checkVersionFreshness(): Promise<HealthCheck> {
 }
 
 // Check Claude Code CLI (async with proper env inheritance)
+// ADR-150 — surface MetaHarness availability + harnessFit score in
+// the standard ruflo doctor flow. Graceful degradation: when metaharness
+// is not installed (no network, optionalDep skipped), the check returns
+// `warn` with a hint instead of `fail` — ruflo continues to function.
+/**
+ * iter 45 — verify the ruflo-side MetaHarness integration is intact.
+ *
+ * The existing `checkMetaharness` verifies the UPSTREAM `metaharness`
+ * package is reachable (warn if missing — it's optional per ADR-150).
+ * This check verifies the INTEGRATION LAYER (plugin scripts, production
+ * module, subprocess bridge) is intact. Unlike upstream, the integration
+ * layer is shipped with ruflo — missing files mean ruflo's install is
+ * corrupted, not that an optional dep is absent.
+ *
+ * Status mapping:
+ *   pass — all required files present + module loads + similarity() smoke OK
+ *   fail — any required file missing OR module fails to import
+ *   warn — files present but module import errored at runtime
+ *
+ * Verified files (iter 36-53 surfaces — full ADR-150 deep-integration set):
+ *   - plugins/ruflo-metaharness/scripts/_harness.mjs                (subprocess bridge)
+ *   - plugins/ruflo-metaharness/scripts/_similarity.mjs             (ADR-152 §3.1 module, iter 36)
+ *   - plugins/ruflo-metaharness/scripts/similarity.mjs              (CLI skill, iter 36)
+ *   - plugins/ruflo-metaharness/scripts/_spike-similarity.mjs       (regression anchor, iter 35)
+ *   - plugins/ruflo-metaharness/scripts/drift-from-history.mjs      (1-command primitive, iter 53)
+ *   - plugins/ruflo-metaharness/skills/harness-similarity/SKILL.md
+ *   - plugins/ruflo-metaharness/skills/harness-drift-from-history/SKILL.md  (iter 53)
+ */
+async function checkMetaharnessIntegration(): Promise<HealthCheck> {
+  // Locate plugins dir.
+  //
+  // Pre-#2437 fix this only walked up from `process.cwd()` + checked one
+  // hard-coded `<cwd>/node_modules/@claude-flow/cli/...` candidate. That
+  // missed the two cases users actually run from:
+  //   (a) `npx @claude-flow/cli@<tag>` → resolves to a per-version cache
+  //       under `~/.npm/_npx/<hash>/node_modules/@claude-flow/cli/...`
+  //   (b) `npm install -g @claude-flow/cli` → lives at
+  //       `$(npm prefix -g)/lib/node_modules/@claude-flow/cli/...`
+  //
+  // The bulletproof fix: resolve relative to THIS file's own location via
+  // `import.meta.url`. The plugins dir is always a sibling of the package
+  // root regardless of where the package was installed. Walk up from
+  // `dist/src/commands/doctor.js` (built) or `src/commands/doctor.ts`
+  // (dev) until we find a directory containing `plugins/ruflo-metaharness/`.
+  const candidates: string[] = [];
+
+  // Strategy 1: walk up from this module's own URL — covers npx + global install.
+  try {
+    const selfDir = dirname(fileURLToPath(import.meta.url));
+    let q = selfDir;
+    for (let i = 0; i < 8; i++) {
+      candidates.push(join(q, 'plugins', 'ruflo-metaharness'));
+      q = dirname(q);
+    }
+  } catch {
+    // import.meta.url unavailable under some bundlers — fall through to cwd walk.
+  }
+
+  // Strategy 2: walk up from cwd — covers monorepo dev (running from a sub-package).
+  let p = process.cwd();
+  for (let i = 0; i < 8; i++) {
+    candidates.push(join(p, 'plugins', 'ruflo-metaharness'));
+    p = dirname(p);
+  }
+
+  // Strategy 3: explicit node_modules path relative to cwd — covers project-local install.
+  candidates.push(join(process.cwd(), 'node_modules', '@claude-flow', 'cli', 'plugins', 'ruflo-metaharness'));
+
+  let pluginDir: string | null = null;
+  for (const c of candidates) {
+    if (existsSync(join(c, 'scripts', '_harness.mjs'))) {
+      pluginDir = c;
+      break;
+    }
+  }
+
+  if (!pluginDir) {
+    // #2437: MetaHarness is documented as an optional dependency in
+    // optionalDependencies (per ADR-150 architectural constraint #2 —
+    // "Optional in package.json"). A genuinely-absent plugin therefore
+    // warrants WARN, not FAIL — same posture as the runtime path which
+    // returns {degraded: true, exit 0}. FAIL is reserved for misconfigured
+    // installs where the plugin SHOULD be present but is broken.
+    return {
+      name: 'MetaHarness integration (ADR-150)',
+      status: 'warn',
+      message: 'plugins/ruflo-metaharness/ not found — MetaHarness skills will degrade gracefully',
+      fix: 'Optional: install via `npm i -D @metaharness/darwin metaharness` or run `ruflo plugins install ruflo-metaharness`',
+    };
+  }
+
+  // Required files (iter 36+44 surfaces, +ADR-153 darwin surfaces in v3.13.0)
+  const required = [
+    'scripts/_harness.mjs',
+    'scripts/_similarity.mjs',
+    'scripts/similarity.mjs',
+    'scripts/_spike-similarity.mjs',
+    // iter 53 surfaces — gated against silent deletion
+    'scripts/drift-from-history.mjs',
+    'skills/harness-similarity/SKILL.md',
+    'skills/harness-drift-from-history/SKILL.md',
+    // ADR-153 Darwin Mode surfaces (v3.13.0) — added to gate against silent deletion
+    'scripts/_darwin.mjs',
+    'scripts/evolve.mjs',
+    'scripts/security-bench.mjs',
+    'scripts/bench.mjs',
+    'skills/harness-evolve/SKILL.md',
+    'skills/harness-security-bench/SKILL.md',
+    'skills/harness-bench/SKILL.md',
+  ];
+  const missing = required.filter((f) => !existsSync(join(pluginDir, f)));
+  if (missing.length > 0) {
+    return {
+      name: 'MetaHarness integration (ADR-150)',
+      status: 'fail',
+      message: `Missing files: ${missing.join(', ')}`,
+      fix: 'Reinstall ruflo or restore from git: `git checkout HEAD -- plugins/ruflo-metaharness/`',
+    };
+  }
+
+  // Runtime smoke: import the similarity module and exercise it
+  try {
+    const modPath = join(pluginDir, 'scripts', '_similarity.mjs');
+    const mod = await import(modPath) as { similarity?: (a: unknown, b: unknown) => { overall?: number } };
+    if (typeof mod.similarity !== 'function') {
+      return {
+        name: 'MetaHarness integration (ADR-150)',
+        status: 'fail',
+        message: '_similarity.mjs does not export similarity()',
+        fix: 'Reinstall ruflo or restore the file from git',
+      };
+    }
+    const result = mod.similarity({}, {});
+    if (typeof result?.overall !== 'number') {
+      return {
+        name: 'MetaHarness integration (ADR-150)',
+        status: 'warn',
+        message: 'similarity() returned unexpected shape; module may be stale',
+      };
+    }
+
+    // iter 52 — also verify the iter-50 mcp-scan text parser exports
+    // correctly. parseMcpScanText is the shared util both mcp-scan.mjs
+    // and oia-audit.mjs depend on; if it's missing the audit-trend
+    // introduced/cleared diff silently degrades to dead code.
+    //
+    // iter 61 — additionally verify iter-56's async exports
+    // (runHarnessAsync / runMetaharnessAsync). These are the
+    // parallelization primitives oia-audit depends on; if they're
+    // missing, oia-audit's import fails and the whole pipeline breaks.
+    const harnessPath = join(pluginDir, 'scripts', '_harness.mjs');
+    const harnessMod = await import(harnessPath) as {
+      parseMcpScanText?: (s: string) => unknown;
+      runHarnessAsync?: (args: string[]) => Promise<unknown>;
+      runMetaharnessAsync?: (args: string[]) => Promise<unknown>;
+    };
+    if (typeof harnessMod.parseMcpScanText !== 'function') {
+      return {
+        name: 'MetaHarness integration (ADR-150)',
+        status: 'fail',
+        message: '_harness.mjs does not export parseMcpScanText (iter 50 — needed by mcp-scan + oia-audit)',
+        fix: 'Reinstall ruflo or restore _harness.mjs from git',
+      };
+    }
+    if (typeof harnessMod.runHarnessAsync !== 'function' || typeof harnessMod.runMetaharnessAsync !== 'function') {
+      return {
+        name: 'MetaHarness integration (ADR-150)',
+        status: 'fail',
+        message: '_harness.mjs missing iter-56 async exports (runHarnessAsync / runMetaharnessAsync) — oia-audit parallelization will fail',
+        fix: 'Reinstall ruflo or restore _harness.mjs from git',
+      };
+    }
+    // Smoke: parser handles empty input gracefully
+    const parsed = harnessMod.parseMcpScanText('') as { findings?: unknown };
+    if (!Array.isArray(parsed?.findings)) {
+      return {
+        name: 'MetaHarness integration (ADR-150)',
+        status: 'warn',
+        message: 'parseMcpScanText returned unexpected shape on empty input',
+      };
+    }
+
+    return {
+      name: 'MetaHarness integration (ADR-150)',
+      status: 'pass',
+      message: 'plugin scripts intact, _similarity.mjs + parseMcpScanText load, smoke OK',
+    };
+  } catch (e) {
+    return {
+      name: 'MetaHarness integration (ADR-150)',
+      status: 'warn',
+      message: `Module import errored: ${(e as Error).message.slice(0, 60)}`,
+    };
+  }
+}
+
+async function checkMetaharness(): Promise<HealthCheck> {
+  try {
+    const version = await runCommand('npx -y metaharness@latest --version 2>&1', 15000);
+    // metaharness emits multi-line stdout; parse a version-shaped line.
+    const versionMatch = version.match(/(\d+\.\d+\.\d+)/);
+    if (!versionMatch) {
+      return {
+        name: 'MetaHarness (ADR-150)',
+        status: 'warn',
+        message: 'Installed but version-string not parseable; integration may still work',
+      };
+    }
+    return {
+      name: 'MetaHarness (ADR-150)',
+      status: 'pass',
+      message: `v${versionMatch[1]} — run \`npx ruflo metaharness score\` for the full scorecard`,
+    };
+  } catch {
+    return {
+      name: 'MetaHarness (ADR-150)',
+      status: 'warn',
+      message: 'Not installed — `npx ruflo metaharness *` commands will degrade gracefully',
+      fix: 'npm install --include=optional  # to enable the metaharness optional dep',
+    };
+  }
+}
+
 async function checkClaudeCode(): Promise<HealthCheck> {
   try {
     const version = await runCommand('claude --version');
@@ -741,7 +1043,7 @@ export const doctorCommand: Command = {
     {
       name: 'component',
       short: 'c',
-      description: 'Check specific component (version, node, npm, config, daemon, memory, api, git, mcp, claude, disk, typescript)',
+      description: 'Check specific component (version, node, npm, config, daemon, memory, api, git, mcp, claude, disk, typescript, agentic-flow, encryption, federation, metaharness)',
       type: 'string'
     },
     {
@@ -779,6 +1081,7 @@ export const doctorCommand: Command = {
       checkGit,
       checkGitRepo,
       checkConfigFile,
+      checkStaleSettingsNpx, // #2448 — runaway `npx @latest` in statusLine/hooks
       checkDaemonStatus,
       checkMemoryDatabase,
       checkApiKeys,
@@ -789,6 +1092,8 @@ export const doctorCommand: Command = {
       checkAgenticFlow,
       checkEncryptionAtRest, // ADR-096 Phase 5
       checkFederationBreaker, // ADR-097 Phase 4
+      checkMetaharness, // ADR-150 — MetaHarness upstream package
+      checkMetaharnessIntegration, // iter 45 — ruflo-side integration layer
     ];
 
     const componentMap: Record<string, () => Promise<HealthCheck>> = {
@@ -798,6 +1103,7 @@ export const doctorCommand: Command = {
       'npm': checkNpmVersion,
       'claude': checkClaudeCode,
       'config': checkConfigFile,
+      'stale-settings': checkStaleSettingsNpx, // #2448
       'daemon': checkDaemonStatus,
       'memory': checkMemoryDatabase,
       'api': checkApiKeys,
@@ -809,6 +1115,8 @@ export const doctorCommand: Command = {
       'agentic-flow': checkAgenticFlow,
       'encryption': checkEncryptionAtRest, // ADR-096 Phase 5
       'federation': checkFederationBreaker, // ADR-097 Phase 4
+      'metaharness': checkMetaharness, // ADR-150 — upstream package
+      'metaharness-integration': checkMetaharnessIntegration, // iter 45 — ruflo-side
     };
 
     let checksToRun = allChecks;
