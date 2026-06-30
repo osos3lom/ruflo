@@ -70,5 +70,10 @@ All ADRs are located in [`/v3/implementation/adrs/`](../../implementation/adrs/)
 
 ---
 
-**Last Updated:** 2026-01-14
-**CLI Version:** @claude-flow/cli@3.0.0-alpha.104
+| [ADR-163](ADR-163-multi-agent-performance-benchmarking-suite.md) | Multi-Agent Performance Benchmarking Suite | Implemented (smoke) |
+| [ADR-164](ADR-164-agentbbs-business-autopilot.md) | Reinforcement-Learned Stopping Policy for Swarm Orchestration | Proposed |
+| [ADR-165](ADR-165-security-cve-posture-review.md) | Security and CVE Posture Review — June 2026 | Draft |
+| [ADR-166](ADR-166-dream-cycle-performance-cross-agent-kvcache.md) | Cross-Agent KV-Cache Sharing for Swarm Performance | Proposed |
+
+**Last Updated:** 2026-06-30
+**CLI Version:** @claude-flow/cli@3.16.2
