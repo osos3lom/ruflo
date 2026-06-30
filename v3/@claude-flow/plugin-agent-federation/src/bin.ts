@@ -129,7 +129,7 @@ function makeContext(): PluginContext {
   return {
     config: {
       nodeName: process.env.FEDERATION_NODE_NAME ?? hostname(),
-      bindHost: process.env.FEDERATION_BIND_HOST ?? '0.0.0.0',
+      bindHost: process.env.FEDERATION_BIND_HOST ?? '127.0.0.1',
       bindPort: Number(process.env.FEDERATION_BIND_PORT ?? 8443),
       defaultTrustLevel: process.env.FEDERATION_TRUST_LEVEL ?? 'untrusted',
     },

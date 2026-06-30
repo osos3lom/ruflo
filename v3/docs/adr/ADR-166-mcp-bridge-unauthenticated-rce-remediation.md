@@ -38,6 +38,8 @@ This ADR provides:
 
 **In scope**: the deployed MCP bridge (`ruflo/src/ruvocal/mcp-bridge/index.js`) and its sibling (`ruflo/src/mcp-bridge/index.js`); the shipping `ruflo/docker-compose.yml`; the nginx reverse proxy (`ruflo/src/nginx/nginx.conf`); the stdio MCP backend spawn path; the `MCP_GROUP_*` tool-group exposure model; and the `plugin-agent-federation` default bind host.
 
+**Design contract** (per maintainer decision 2026-06-30): the MCP bridge is local-only by default. Public network exposure is an **explicit opt-in deployment pattern** (`MCP_BIND_HOST=0.0.0.0` + `MCP_AUTH_TOKEN` required). Local-only deployments do not carry the auth burden — the threat model and Phase 1 deliverables below are calibrated to this contract.
+
 **Out of scope**: the npm dependency-CVE landscape (covered by ADR-165); the `@claude-flow/security` package internals; non-ruvocal deployment topologies beyond the documented Docker and `npx`/CLI paths; full TLS/network-segmentation design (referenced as operational guidance only).
 
 ### 1.3 Limitations of this audit
@@ -166,19 +168,40 @@ Apply Layer-1–3 changes to **both** bridge files (`ruflo/src/ruvocal/mcp-bridg
 0c. **Audit the learning + conversation stores.** Inspect the AgentDB pattern store for injected `agentdb_pattern-store` entries (step 5) and MongoDB for tampering; purge poisoned patterns. **A patched redeploy alone does not undo poisoning.**
 0d. **Coordinate disclosure timeline** with the reporter; open a private GitHub Security Advisory; reserve a CVE.
 
-### Phase 1 — Close the RCE (P0, target: hotfix release)
+### Phase 1 — Default to local-only; auth required for the optional public deployment pattern (P0, target: hotfix release)
 
-**1a. Authenticate the HTTP surface (root cause, V1).** Mount an auth middleware before all `/mcp*`, `/chat/completions`, `/autopilot*`, `/mcp-servers` routes; require `Authorization: Bearer <token>` compared in constant time against `MCP_AUTH_TOKEN`. `/health` stays open (liveness only).
+**1a. Bind loopback by default everywhere (root cause of public-default exposure, V6/V8).** Was 1c. Now the leading change.
+  - `ruflo/docker-compose.yml`: `"3001:3001"` → `"127.0.0.1:3001:3001"`; same for Mongo `"27017:27017"` → `"127.0.0.1:27017:27017"`
+  - `ruflo/src/ruvocal/mcp-bridge/index.js` + `ruflo/src/mcp-bridge/index.js`: `app.listen(PORT)` → `app.listen(PORT, BIND_HOST)` where `BIND_HOST = process.env.MCP_BIND_HOST || '127.0.0.1'`
+  - `v3/@claude-flow/plugin-agent-federation/src/bin.ts`: default `bindHost: '127.0.0.1'` (was `'0.0.0.0'`)
+
+**1b. Fail closed on public-bind opt-in without token (root cause of un-authed public exposure when operator opts in, V1).** Was 1b. Now second.
 
 ```js
-import { timingSafeEqual } from "node:crypto";
-const TOKEN = process.env.MCP_AUTH_TOKEN || "";
+const BIND_HOST = process.env.MCP_BIND_HOST || "127.0.0.1";
+const isPublic = BIND_HOST !== "127.0.0.1" && BIND_HOST !== "localhost";
+if (isPublic && !process.env.MCP_AUTH_TOKEN) {
+  console.error(
+    "FATAL: refusing to bind a public interface without MCP_AUTH_TOKEN. " +
+    "Generate one with: MCP_AUTH_TOKEN=$(openssl rand -base64 32)"
+  );
+  process.exit(1);
+}
+app.listen(PORT, BIND_HOST, () => { /* ... */ });
+```
+
+  Token generation guidance: `MCP_AUTH_TOKEN=$(openssl rand -base64 32)`. Recommend ≥32 bytes.
+
+**1c. Authenticate the HTTP surface when token IS set (V1, for the opt-in case).** Was 1a. Now third.
+
+```js
+const MCP_TOKEN = process.env.MCP_AUTH_TOKEN || "";
 function requireAuth(req, res, next) {
   if (req.path === "/health") return next();
-  const expected = `Bearer ${TOKEN}`;
+  if (!MCP_TOKEN) return next();
+  const expected = `Bearer ${MCP_TOKEN}`;
   const got = req.get("authorization") || "";
-  const ok = TOKEN.length > 0 &&
-    got.length === expected.length &&
+  const ok = got.length === expected.length &&
     timingSafeEqual(Buffer.from(got), Buffer.from(expected));
   if (!ok) return res.status(401).json({ error: "unauthorized" });
   next();
@@ -186,21 +209,30 @@ function requireAuth(req, res, next) {
 app.use(requireAuth);
 ```
 
-**1b. Fail closed at startup.** If the bind host is non-loopback **and** `MCP_AUTH_TOKEN` is unset, refuse to start.
-
-```js
-const BIND_HOST = process.env.MCP_BIND_HOST || "127.0.0.1";
-const isPublic = BIND_HOST !== "127.0.0.1" && BIND_HOST !== "localhost";
-if (isPublic && !process.env.MCP_AUTH_TOKEN) {
-  console.error("FATAL: refusing to bind a public interface without MCP_AUTH_TOKEN");
-  process.exit(1);
-}
-app.listen(PORT, BIND_HOST, () => { /* ... */ });
-```
-
-**1c. Bind loopback by default (V6).** `docker-compose.yml`: `"3001:3001"` → `"127.0.0.1:3001:3001"`. Public exposure becomes an explicit, token-gated opt-in (`MCP_BIND_HOST`).
+  Behavior: if `MCP_AUTH_TOKEN` is unset AND bind is loopback, middleware is a no-op (local IPC trust model); if `MCP_AUTH_TOKEN` is set (any bind), middleware enforces 401.
 
 **1d. Gate `terminal_execute` (V2).** Off unless `MCP_ENABLE_TERMINAL=true`; print a security warning at startup when enabled. Enforce inside `executeTool` so every path is covered (see 2a).
+
+### Optional public deployment pattern — explicit opt-in
+
+When an operator deliberately exposes the bridge to a non-loopback interface (cloud, VPN-routed, or shared host), they MUST set BOTH of:
+
+| Variable | Required | Notes |
+|----------|----------|-------|
+| `MCP_BIND_HOST` | yes (≠ 127.0.0.1) | e.g. `0.0.0.0` or a specific interface IP |
+| `MCP_AUTH_TOKEN` | yes (≥32 bytes) | Generate: `openssl rand -base64 32`. Rotate quarterly. |
+
+`docker-compose.public.yml` (NEW, separate file from the default compose) is the supported public-deployment composition. The default `docker-compose.yml` stays loopback-only.
+
+Generate the token, write to `.env` (gitignored), reference from compose:
+
+```bash
+echo "MCP_AUTH_TOKEN=$(openssl rand -base64 32)" >> .env
+echo "MCP_BIND_HOST=0.0.0.0" >> .env
+docker compose -f docker-compose.yml -f docker-compose.public.yml up -d
+```
+
+If either var is missing on a public bind, the bridge exits non-zero at startup. The chat-ui service must inject `Authorization: Bearer <token>` (Q1).
 
 ### Phase 2 — Reduce blast radius (P1, target: same release train)
 
@@ -234,8 +266,8 @@ app.listen(PORT, BIND_HOST, () => { /* ... */ });
 
 ### Risks
 
-**R1 — Breaking change for the Chat UI.** Once `/mcp` requires a bearer, the chat-ui service and its `MCP_SERVERS` config must inject `Authorization`. The bridge sits behind nginx on the internal network; the token must be provisioned to chat-ui and (if the bridge is exposed) to any external client. Call this out prominently in release notes.
-**R2 — Tokenless dev friction.** Localhost-only dev runs may stay tokenless (1b only fails closed on public binds); document the trade-off so developers don't disable auth wholesale.
+**R1 — UX cost is concentrated in the optional public path.** Local-only deployments see zero new friction (no token, no headers, no rotation). The auth surface and rotation burden land only on operators who explicitly opt into public exposure — which matches the principle of "pay the security cost only when you assume the risk."
+**R2 — Operators may set `MCP_BIND_HOST=0.0.0.0` without realizing the auth requirement.** Mitigated by 1b (fail-closed with a clear FATAL message + token-generation guidance in the same error string). The fatal log line MUST include the exact `openssl rand -base64 32` command.
 **R3 — Allowlist over-restriction.** Moving to an allowlist (2a) may break workflows that rely on tools we forget to list. Mitigate by enumerating the current default-on tool set before flipping the default and logging every denied call.
 **R4 — Persistence may already exist.** If an instance was exploited pre-patch, a beacon/`NODE_OPTIONS` preload may persist across a plain image pull. Phase 0c (rebuild from clean image + rotate keys + audit stores) is mandatory, not optional.
 
@@ -250,7 +282,7 @@ app.listen(PORT, BIND_HOST, () => { /* ... */ });
 
 ## 8. Alternatives Considered and Rejected
 
-**"Bind loopback only; skip auth."** Rejected as the sole fix: breaks the documented cloud deployment (ADR-029) and leaves localhost, shared-host, and SSRF-pivot exploitation open. Auth is the root cause.
+**"Bind loopback by default; auth only for the optional public deployment pattern."** ACCEPTED (2026-06-30 per maintainer review). Rationale: matches the design contract that MCP is fundamentally local IPC; the public deployment story is an opt-in operational mode, not the default. Auth cost is paid only by operators who opt in. The previously-proposed always-on bearer auth was rejected as imposing local-IPC overhead on the common case.
 
 **"Remove `terminal_execute` entirely."** Necessary-but-insufficient. Other tools (`agentdb_pattern-store` poisoning, swarm spawn on victim keys, Mongo reachability) keep platform-compromise paths open. Gate it (Phase 1d) *and* authenticate (1a).
 
@@ -285,6 +317,7 @@ app.listen(PORT, BIND_HOST, () => { /* ... */ });
 
 ### Predecessor ADRs
 
+- **Maintainer decision 2026-06-30** (this branch's review thread): MCP design contract is local-only; public is explicit opt-in.
 - [ADR-029](../../../ruflo/docs/adr/ADR-029-HUGGINGFACE-CHAT-UI-CLOUD-RUN.md) — documented Cloud Run deployment path
 - [ADR-034](../../../ruflo/docs/adr/ADR-034-OPTIONAL-MCP-BACKENDS.md) — optional stdio MCP backends (`ruflo`/`ruvector`/…)
 - [ADR-035](../../../ruflo/docs/adr/ADR-035-MCP-TOOL-GROUPS.md) — `MCP_GROUP_*` default-on/opt-in model

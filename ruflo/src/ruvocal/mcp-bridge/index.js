@@ -1,6 +1,6 @@
 import express from "express";
 import { spawn } from "child_process";
-import { randomUUID } from "crypto";
+import { randomUUID, timingSafeEqual } from "crypto";
 
 // =============================================================================
 // CONFIGURATION
@@ -12,6 +12,7 @@ const CLOUD_FUNCTIONS = {
 };
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
+const BIND_HOST = process.env.MCP_BIND_HOST || "127.0.0.1";
 
 // =============================================================================
 // TOOL GROUPS — Enable/disable categories of tools independently
@@ -1042,6 +1043,21 @@ app.use((req, res, next) => {
   next();
 });
 
+// ---------- Auth middleware ----------
+// No-op in local-only mode (MCP_AUTH_TOKEN unset). Enforces 401 when token is set.
+const MCP_TOKEN = process.env.MCP_AUTH_TOKEN || "";
+function requireAuth(req, res, next) {
+  if (req.path === "/health") return next();
+  if (!MCP_TOKEN) return next();
+  const expected = `Bearer ${MCP_TOKEN}`;
+  const got = req.get("authorization") || "";
+  const ok = got.length === expected.length &&
+    timingSafeEqual(Buffer.from(got), Buffer.from(expected));
+  if (!ok) return res.status(401).json({ error: "unauthorized" });
+  next();
+}
+app.use(requireAuth);
+
 // ---------- Shared MCP handler ----------
 function createMcpHandler(groupName) {
   return async (req, res) => {
@@ -1886,8 +1902,16 @@ app.get("/groups", (_, res) => {
 // =============================================================================
 
 async function main() {
-  app.listen(PORT, () => {
-    console.log(`MCP Bridge v2.0.0 on port ${PORT}`);
+  const isPublic = BIND_HOST !== "127.0.0.1" && BIND_HOST !== "localhost";
+  if (isPublic && !process.env.MCP_AUTH_TOKEN) {
+    console.error(
+      "FATAL: refusing to bind a public interface without MCP_AUTH_TOKEN. " +
+      "Generate one with: MCP_AUTH_TOKEN=$(openssl rand -base64 32)"
+    );
+    process.exit(1);
+  }
+  app.listen(PORT, BIND_HOST, () => {
+    console.log(`MCP Bridge v2.0.0 on port ${PORT} (${BIND_HOST})`);
     const enabled = Object.entries(TOOL_GROUPS).filter(([, g]) => g.enabled).map(([n]) => n);
     console.log(`Active groups: ${enabled.join(", ")}`);
   });
